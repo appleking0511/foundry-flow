@@ -115,15 +115,26 @@ export default function FactoryGame() {
   const [recipeQuery, setRecipeQuery] = useState("");
   const [selectedRecipe, setSelectedRecipe] = useState<Item>("ironOre");
   const [loaded, setLoaded] = useState(false);
+  const [bootReady, setBootReady] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [incomePerSecond, setIncomePerSecond] = useState(0);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const down = useRef<{ x: number; y: number } | null>(null);
   const wasDragging = useRef(false);
+  const audioContext = useRef<AudioContext | null>(null);
+  const masterGain = useRef<GainNode | null>(null);
+  const bgmTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const bgmStep = useRef(0);
+  const incomeEvents = useRef<{ at: number; value: number }[]>([]);
 
   useEffect(() => {
     try { const raw = localStorage.getItem("factory-flow-save"); if (raw) setGame({ ...initial, ...JSON.parse(raw), items: [] }); } catch {}
     setLoaded(true);
   }, []);
+  useEffect(() => { const id = setTimeout(() => setBootReady(true), 1400); return () => clearTimeout(id); }, []);
   useEffect(() => { if (!loaded) return; const id = setInterval(() => localStorage.setItem("factory-flow-save", JSON.stringify({ ...game, items: [] })), 5000); return () => clearInterval(id); }, [game, loaded]);
+  useEffect(() => { const id = setInterval(() => { const cutoff = Date.now() - 5000; incomeEvents.current = incomeEvents.current.filter(event => event.at >= cutoff); setIncomePerSecond(incomeEvents.current.reduce((sum, event) => sum + event.value, 0) / 5); }, 500); return () => clearInterval(id); }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key.toLowerCase() === "r") setRotation(r => (r + 1) % 4); if (e.key === "Escape") setSelected("conveyor"); };
     addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey);
@@ -137,8 +148,44 @@ export default function FactoryGame() {
     return () => clearInterval(id);
   }, []);
 
+  const ensureAudio = useCallback(() => {
+    if (!audioContext.current) {
+      const AudioCtor = window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const context = new AudioCtor(), master = context.createGain();
+      master.gain.value = muted ? 0 : .72; master.connect(context.destination);
+      audioContext.current = context; masterGain.current = master;
+    }
+    if (audioContext.current.state === "suspended") void audioContext.current.resume();
+    return audioContext.current;
+  }, [muted]);
+
+  const playTone = useCallback((frequency: number, duration: number, volume: number, type: OscillatorType = "sine", delay = 0) => {
+    const context = ensureAudio(), master = masterGain.current; if (!master) return;
+    const oscillator = context.createOscillator(), gain = context.createGain(), start = context.currentTime + delay;
+    oscillator.type = type; oscillator.frequency.setValueAtTime(frequency, start);
+    gain.gain.setValueAtTime(.0001, start); gain.gain.exponentialRampToValueAtTime(volume, start + .025); gain.gain.exponentialRampToValueAtTime(.0001, start + duration);
+    oscillator.connect(gain); gain.connect(master); oscillator.start(start); oscillator.stop(start + duration + .03);
+  }, [ensureAudio]);
+
+  const playSfx = useCallback((sound: "install" | "upgrade" | "delete") => {
+    if (sound === "install") { playTone(330, .13, .1, "square"); playTone(495, .18, .08, "triangle", .07); }
+    if (sound === "upgrade") { playTone(392, .13, .09, "triangle"); playTone(523, .16, .09, "triangle", .08); playTone(659, .24, .08, "sine", .16); }
+    if (sound === "delete") { playTone(190, .18, .11, "sawtooth"); playTone(105, .27, .08, "square", .09); }
+  }, [playTone]);
+
+  const startBgm = useCallback(() => {
+    ensureAudio(); if (bgmTimer.current) return;
+    const melody = [130.81, 164.81, 196, 246.94, 146.83, 174.61, 220, 261.63, 123.47, 164.81, 196, 246.94, 110, 146.83, 174.61, 220];
+    const playBeat = () => { const step = bgmStep.current++ % melody.length; playTone(melody[step], .72, .018, "triangle"); playTone(melody[step] * 2, .34, .009, "sine", .08); if (step % 4 === 0) playTone(melody[step] / 2, 1.8, .014, "sine"); };
+    playBeat(); bgmTimer.current = setInterval(playBeat, 680);
+  }, [ensureAudio, playTone]);
+
+  const startGame = () => { if (!bootReady) return; startBgm(); setStarted(true); };
+  const toggleSound = () => { const next = !muted; setMuted(next); const context = audioContext.current, gain = masterGain.current; if (context && gain) gain.gain.setTargetAtTime(next ? 0 : .72, context.currentTime, .04); };
+  useEffect(() => () => { if (bgmTimer.current) clearInterval(bgmTimer.current); if (audioContext.current) void audioContext.current.close(); }, []);
+
   const tick = useCallback(() => setGame(prev => {
-    if (paused) return prev;
+    if (paused || !started) return prev;
     const g: GameState = { ...prev, buildings: { ...prev.buildings }, items: prev.items.map(i => ({ ...i })), sold: { ...prev.sold }, inventory: { ...prev.inventory }, sellerStatus: { ...prev.sellerStatus }, lifetime: prev.lifetime + .5 };
     for (const [pos, b] of Object.entries(g.buildings)) if (b.kind === "powerPlant" && (g.inventory[`fuel:${pos}`] || 0) > 0) g.inventory[`fuel:${pos}`] = Math.max(0, g.inventory[`fuel:${pos}`] - .25);
     const powered = poweredNetwork(g.buildings, g.inventory);
@@ -210,9 +257,10 @@ export default function FactoryGame() {
       }
     }
     g.items = g.items.filter(i => !toRemove.has(i.id)).concat(spawned).slice(-160);
+    if (earned > 0) incomeEvents.current.push({ at: Date.now(), value: earned });
     g.money += earned; g.cityXp += xp; g.research += researchGain;
     return g;
-  }), [market, paused]);
+  }), [market, paused, started]);
   useEffect(() => { const id = setInterval(tick, 500); return () => clearInterval(id); }, [tick]);
 
   const place = (x: number, y: number) => {
@@ -229,6 +277,7 @@ export default function FactoryGame() {
       }
       if (selected === "delete") {
         if (!g.buildings[pos]) return g; setToast("건물을 철거하고 비용의 50%를 회수했습니다");
+        playSfx("delete");
         const sellerStatus = { ...g.sellerStatus }; delete sellerStatus[pos];
         return { ...g, money: g.money + buildingMeta[g.buildings[pos].kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos), sellerStatus };
       }
@@ -238,6 +287,7 @@ export default function FactoryGame() {
       if (selected === "drill" && resources[pos] !== "iron") { setToast("철광기는 철광맥 위에만 설치할 수 있습니다"); return g; }
       if (selected === "lumber" && resources[pos] !== "tree") { setToast("벌목기는 나무 위에만 설치할 수 있습니다"); return g; }
       setToast(`${meta.name} 설치 완료 · R 키로 방향 전환`);
+      playSfx("install");
       return { ...g, money: g.money - meta.cost, buildings: { ...g.buildings, [pos]: { kind: selected, dir: rotation, progress: 0, level: 1 } } };
     });
   };
@@ -272,6 +322,7 @@ export default function FactoryGame() {
   const deleteAt = (pos: string) => setGame(g => {
     const b = g.buildings[pos]; if (!b) return g;
     setInspectorPos(null); setToast(`${buildingMeta[b.kind].name} 철거 · 비용 50% 회수`);
+    playSfx("delete");
     const sellerStatus = { ...g.sellerStatus }; delete sellerStatus[pos];
     return { ...g, money: g.money + buildingMeta[b.kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos), sellerStatus };
   });
@@ -281,6 +332,7 @@ export default function FactoryGame() {
     const level = b.level || 1, cost = upgradeCost(b.kind, level);
     if (g.money < cost) { setToast(`업그레이드 자금이 ₩${won(cost - g.money)} 부족합니다`); return g; }
     setToast(`${buildingMeta[b.kind].name} Lv.${level + 1} · 생산 효율 +25%`);
+    playSfx("upgrade");
     return { ...g, money: g.money - cost, buildings: { ...g.buildings, [pos]: { ...b, level: level + 1 } } };
   });
   const levelUpResearch = () => setGame(g => {
@@ -305,6 +357,15 @@ export default function FactoryGame() {
   };
 
   return <main className="game-shell">
+    {!started && <section className={`boot-screen ${bootReady ? "ready" : "loading"}`} onClick={startGame} aria-label={bootReady ? "게임 시작" : "게임 로딩 중"}>
+      <div className="boot-grid" />
+      <div className="boot-logo"><span>AK</span><small>INDUSTRIAL SYSTEMS</small></div>
+      <h1>APPLEKING <em>GAMES</em></h1>
+      <p>FOUNDRY FLOW</p>
+      <div className="boot-loader"><i /><b>{bootReady ? "SYSTEM READY" : "FACTORY DATA LOADING"}</b></div>
+      <button disabled={!bootReady}>{bootReady ? "화면을 눌러 게임 시작" : "불러오는 중…"}</button>
+      <footer>HEADPHONES RECOMMENDED · LANDSCAPE MODE</footer>
+    </section>}
     <header className="topbar">
       <div className="brand"><span className="brand-mark">F</span><div><b>FOUNDRY FLOW</b><small>자동화 도시 건설국</small></div></div>
       <div className="top-stats">
@@ -312,7 +373,7 @@ export default function FactoryGame() {
         <div><small>도시 성장</small><strong>LV.{cityLevel} 제조 도시</strong><span className="mini-track"><i style={{ width: `${game.cityXp % 120 / 1.2}%` }} /></span></div>
         <div><small>연구 포인트</small><strong className="cyan">⌬ {won(game.research)} RP</strong><em>연구소 {Object.values(game.buildings).filter(b => b.kind === "lab").length}동</em></div>
       </div>
-      <div className="header-actions"><button onClick={save}>저장</button><button onClick={() => { if (confirm("저장 데이터를 초기화할까요?")) { localStorage.removeItem("factory-flow-save"); setGame(initial); } }}>↻</button></div>
+      <div className="header-actions"><button onClick={toggleSound} title={muted ? "소리 켜기" : "음소거"}>{muted ? "🔇" : "🔊"}</button><button onClick={save}>저장</button><button onClick={() => { if (confirm("저장 데이터를 초기화할까요?")) { localStorage.removeItem("factory-flow-save"); setGame(initial); } }}>↻</button></div>
     </header>
 
     <section className="workspace">
@@ -421,6 +482,7 @@ export default function FactoryGame() {
 
       <aside className={`intel-panel panel ${mobilePanel === "intel" ? "mobile-open" : ""}`}>
         <div className="tabs"><button className={tab === "status" ? "active" : ""} onClick={() => setTab("status")}>현황</button><button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>시장</button><button className={tab === "contract" ? "active" : ""} onClick={() => setTab("contract")}>계약 <i /></button></div>
+        <div className="income-live"><span><i />실시간 수익<small>최근 5초 평균</small></span><strong>₩{won(incomePerSecond)}<small>/초</small></strong></div>
         {tab === "status" && <div className="intel-scroll">
           <section className="efficiency-card"><div className="ring" style={{ "--value": `${efficiency * 3.6}deg` } as React.CSSProperties}><div><strong>{efficiency}%</strong><small>공장 효율</small></div></div><div className="eff-stats"><span><i className="orange" /> 병목 <b>{Math.max(0, 3 - Math.floor(contractNow / 8))}</b></span><span><i className="red" /> 멈춘 기계 <b>{Math.max(0, Object.values(game.buildings).filter(b => b.kind !== "conveyor" && b.progress > 5).length)}</b></span><span><i className="blue" /> 운송 중 <b>{game.items.length}</b></span></div></section>
           <section className="side-section"><div className="section-head"><h3>실시간 생산</h3><small>분당</small></div>{(["ironOre", "ironPlate", "gear", "wood"] as Item[]).map(type => <div className="resource-row" key={type}><span className="item-chip" style={{ color: itemMeta[type].color }}>{itemMeta[type].icon}</span><span><b>{itemMeta[type].label}</b><small>판매 {game.sold[type] || 0}</small></span><strong>+{Math.min(99, game.items.filter(i => i.type === type).length * 2)}<small>/m</small></strong></div>)}</section>
