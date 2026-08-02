@@ -47,7 +47,7 @@ const won = (n: number) => new Intl.NumberFormat("ko-KR").format(Math.floor(n));
 
 export default function FactoryGame() {
   const [game, setGame] = useState<GameState>(initial);
-  const [selected, setSelected] = useState<Kind | "delete">("conveyor");
+  const [selected, setSelected] = useState<Kind | "delete" | "rotate">("conveyor");
   const [rotation, setRotation] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [paused, setPaused] = useState(false);
@@ -129,6 +129,13 @@ export default function FactoryGame() {
     if (wasDragging.current) { wasDragging.current = false; return; }
     const pos = key(x, y);
     setGame(g => {
+      if (selected === "rotate") {
+        const target = g.buildings[pos];
+        if (!target) { setToast("회전할 건물을 선택하세요"); return g; }
+        const nextDir = (target.dir + 1) % 4;
+        setToast(`${buildingMeta[target.kind].name} 방향을 ${DIRS[nextDir].icon}로 변경했습니다`);
+        return { ...g, buildings: { ...g.buildings, [pos]: { ...target, dir: nextDir } } };
+      }
       if (selected === "delete") {
         if (!g.buildings[pos]) return g; setToast("건물을 철거하고 비용의 50%를 회수했습니다");
         return { ...g, money: g.money + buildingMeta[g.buildings[pos].kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos) };
@@ -173,7 +180,7 @@ export default function FactoryGame() {
     <section className="workspace">
       <nav className="mobile-dock" aria-label="모바일 게임 메뉴">
         <button className={mobilePanel === "build" ? "active" : ""} onClick={() => setMobilePanel(p => p === "build" ? null : "build")}><span>▦</span>건설</button>
-        <button onClick={() => setRotation(r => (r + 1) % 4)}><span>↻</span>회전</button>
+        <button className={selected === "rotate" ? "active" : ""} onClick={() => { setSelected("rotate"); setMobilePanel(null); }}><span>↻</span>회전</button>
         <button className={selected === "delete" ? "active danger" : ""} onClick={() => { setSelected("delete"); setMobilePanel(null); }}><span>⌫</span>철거</button>
         <button className={mobilePanel === "intel" ? "active" : ""} onClick={() => setMobilePanel(p => p === "intel" ? null : "intel")}><span>◫</span>현황</button>
       </nav>
@@ -183,11 +190,11 @@ export default function FactoryGame() {
         <div className="palette-scroll">
           {groups.map(group => <section key={group} className="build-group"><h3>{group}</h3><div className="build-grid">
             {buildings.filter(b => b.group === group).map(b => <button key={b.kind} className={`build-card ${selected === b.kind ? "active" : ""}`} onClick={() => { setSelected(b.kind); setMobilePanel(null); }} title={b.desc}>
-              <span className={`build-icon ${b.kind}`}>{b.icon}</span><span><b>{b.name}</b><small>₩{won(b.cost)}</small></span>
+              <span className={`build-icon ${b.kind}`}>{b.icon}</span><span className="build-copy"><b>{b.name}<em>₩{won(b.cost)}</em></b><small>{b.desc}</small></span>
             </button>)}
           </div></section>)}
         </div>
-        <div className="tool-row"><button className={selected === "delete" ? "active danger" : ""} onClick={() => setSelected("delete")}>⌫ 철거</button><button onClick={() => setRotation(r => (r + 1) % 4)}>↻ 방향 {DIRS[rotation].icon}</button></div>
+        <div className="tool-row"><button className={selected === "delete" ? "active danger" : ""} onClick={() => setSelected("delete")}>⌫ 철거</button><button className={selected === "rotate" ? "active" : ""} onClick={() => setSelected("rotate")}>↻ 설치물 회전</button><button onClick={() => setRotation(r => (r + 1) % 4)}>설치 방향 {DIRS[rotation].icon}</button></div>
       </aside>
 
       <section className="map-area">
@@ -226,7 +233,7 @@ export default function FactoryGame() {
     </section>
 
     <footer className="bottom-bar">
-      <div className="selection"><span className={`build-icon ${selected}`}>{selected === "delete" ? "⌫" : buildingMeta[selected].icon}</span><div><small>선택된 건물</small><b>{selected === "delete" ? "철거 도구" : buildingMeta[selected].name}</b></div><p>{selected === "delete" ? "설치된 건물을 클릭해 철거" : buildingMeta[selected].desc}</p><kbd>{DIRS[rotation].icon}</kbd></div>
+      <div className="selection"><span className={`build-icon ${selected}`}>{selected === "delete" ? "⌫" : selected === "rotate" ? "↻" : buildingMeta[selected].icon}</span><div><small>선택된 도구</small><b>{selected === "delete" ? "철거 도구" : selected === "rotate" ? "설치물 회전" : buildingMeta[selected].name}</b></div><p>{selected === "delete" ? "설치된 건물을 클릭해 철거" : selected === "rotate" ? "설치된 건물을 누를 때마다 90° 회전" : buildingMeta[selected].desc}</p><kbd>{selected === "rotate" ? "탭" : DIRS[rotation].icon}</kbd></div>
       <div className="factory-feed"><small>현재 생산</small><div className="feed-items">{game.items.slice(0, 8).map(i => <span key={i.id} style={{ color: itemMeta[i.type].color }}>{itemMeta[i.type].icon}</span>)}{!game.items.length && <em>라인이 대기 중입니다</em>}</div></div>
       <div className="game-controls"><span className="fps"><i /> 60 FPS</span><button className={paused ? "active" : ""} onClick={() => setPaused(p => !p)}>{paused ? "▶" : "Ⅱ"}</button>{[1,2,4].map(s => <button key={s} className={speed === s ? "active" : ""} onClick={() => { setSpeed(s); setPaused(false); }}>{s}×</button>)}</div>
     </footer>
