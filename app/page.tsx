@@ -65,6 +65,7 @@ const recipeCatalog: { item: Item; building: string; ingredients: string; steps:
 const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, sellerStatus: {}, lifetime: 0, nextId: 1, expanded: false, researchLevel: 1 };
 const key = (x: number, y: number) => `${x},${y}`;
 const won = (n: number) => new Intl.NumberFormat("ko-KR").format(Math.floor(n));
+const researchCost = (level: number) => 80 + (level - 1) * 70;
 const upgradeCost = (kind: Kind, level: number) => Math.floor(Math.max(250, buildingMeta[kind].cost * (.55 + level * .2)));
 const unlockLevel: Partial<Record<Kind, number>> = { assembler: 2, lab: 1 };
 const noUpgrade = new Set<Kind>(["warehouse", "seller", "powerline", "lab"]);
@@ -95,6 +96,7 @@ export default function FactoryGame() {
   const [zoom, setZoom] = useState(.82);
   const [pan, setPan] = useState({ x: 28, y: 20 });
   const [market, setMarket] = useState<Record<Item, number>>(() => Object.fromEntries(Object.keys(itemMeta).map(k => [k, 1])) as Record<Item, number>);
+  const [marketHistory, setMarketHistory] = useState<Record<Item, number[]>>(() => Object.fromEntries((Object.keys(itemMeta) as Item[]).map(type => [type, Array(8).fill(itemMeta[type].price)])) as Record<Item, number[]>);
   const [toast, setToast] = useState("철광기에 컨베이어를 연결해 생산을 시작하세요");
   const [tab, setTab] = useState<"status" | "market" | "contract">("status");
   const [mobilePanel, setMobilePanel] = useState<"build" | "intel" | null>(null);
@@ -117,7 +119,11 @@ export default function FactoryGame() {
     addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey);
   }, []);
   useEffect(() => {
-    const id = setInterval(() => setMarket(m => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, Math.max(.62, Math.min(1.55, v + (Math.random() - .5) * .18))])) as Record<Item, number>), 12000);
+    const id = setInterval(() => setMarket(m => {
+      const next = Object.fromEntries(Object.entries(m).map(([k, v]) => [k, Math.max(.62, Math.min(1.55, v + (Math.random() - .5) * .18))])) as Record<Item, number>;
+      setMarketHistory(history => Object.fromEntries((Object.keys(itemMeta) as Item[]).map(type => [type, [...(history[type] || []), itemMeta[type].price * next[type]].slice(-24)])) as Record<Item, number[]>);
+      return next;
+    }), 12000);
     return () => clearInterval(id);
   }, []);
 
@@ -142,7 +148,7 @@ export default function FactoryGame() {
           const type = resourceMeta[res!].item; const ni = { id: g.nextId++, type, x: nx, y: ny }; spawned.push(ni); occupied.set(key(nx, ny), ni); b.progress = 0;
         }
       }
-      if (b.kind === "lab" && b.progress >= 2) { researchGain += 1; b.progress = 0; }
+      if (b.kind === "lab" && b.progress >= 8) { researchGain += 1; b.progress = 0; }
       if (b.kind === "smelter" && b.progress >= 2 && (g.inventory[`ore:${pos}`] || 0) >= 1 && (g.inventory[`heat:${pos}`] || 0) >= 1 && g.buildings[key(nx, ny)] && !occupied.has(key(nx, ny))) {
         const ni = { id: g.nextId++, type: "ironPlate" as Item, x: nx, y: ny };
         spawned.push(ni); occupied.set(key(nx, ny), ni);
@@ -227,7 +233,10 @@ export default function FactoryGame() {
   const inspectedInfo = inspected ? productionMeta[inspected.kind] : undefined;
   const inspectedSale = inspectorPos ? game.sellerStatus[inspectorPos] : undefined;
   const visibleRecipes = recipeCatalog.filter(recipe => `${itemMeta[recipe.item].label} ${recipe.building} ${recipe.ingredients}`.toLowerCase().includes(recipeQuery.trim().toLowerCase()));
-  const recipeDetail = recipeCatalog.find(recipe => recipe.item === selectedRecipe) || visibleRecipes[0] || recipeCatalog[0];
+  const recipeDetail = visibleRecipes.find(recipe => recipe.item === selectedRecipe) || visibleRecipes[0] || recipeCatalog[0];
+  const selectedPriceHistory = marketHistory[recipeDetail.item] || [itemMeta[recipeDetail.item].price * market[recipeDetail.item]];
+  const historyLow = Math.min(...selectedPriceHistory), historyHigh = Math.max(...selectedPriceHistory);
+  const historyChange = selectedPriceHistory[selectedPriceHistory.length - 1] - selectedPriceHistory[0];
   const activeProduction = Array.from(new Set(Object.values(game.buildings).map(b => productionMeta[b.kind].output).filter(v => !v.includes("운송") && !v.includes("보관") && !v.includes("판매"))));
   const livePower = poweredNetwork(game.buildings, game.inventory);
 
@@ -252,7 +261,7 @@ export default function FactoryGame() {
     return { ...g, money: g.money - cost, buildings: { ...g.buildings, [pos]: { ...b, level: level + 1 } } };
   });
   const levelUpResearch = () => setGame(g => {
-    const cost = g.researchLevel * 40;
+    const cost = researchCost(g.researchLevel);
     if (g.research < cost) { setToast(`연구 레벨업에 RP ${won(cost - g.research)}가 더 필요합니다`); return g; }
     setToast(`연구 Lv.${g.researchLevel + 1} 달성 · 새로운 건설 품목 해금`);
     return { ...g, research: g.research - cost, researchLevel: g.researchLevel + 1 };
@@ -351,6 +360,14 @@ export default function FactoryGame() {
             </div>
             {visibleRecipes.length > 0 && <article className="recipe-detail">
               <header><span style={{ color: itemMeta[recipeDetail.item].color }}>{itemMeta[recipeDetail.item].icon}</span><div><small>선택한 아이템</small><h3>{itemMeta[recipeDetail.item].label}</h3></div><strong>₩{won(itemMeta[recipeDetail.item].price * market[recipeDetail.item])}<small>현재 판매가</small></strong></header>
+              <div className="price-history">
+                <div className="price-history-head"><span>최근 시세 흐름 <small>12초마다 갱신</small></span><em className={historyChange >= 0 ? "up" : "down"}>{historyChange >= 0 ? "▲" : "▼"} ₩{won(Math.abs(historyChange))}</em></div>
+                <div className="price-chart" aria-label={`${itemMeta[recipeDetail.item].label} 가격 변화 그래프`}>{selectedPriceHistory.map((price, index) => {
+                  const range = Math.max(1, historyHigh - historyLow); const height = historyHigh === historyLow ? 45 : 18 + (price - historyLow) / range * 82;
+                  return <i key={`${index}-${price}`} style={{ height: `${height}%` }} title={`${index + 1}번째 시세: ₩${won(price)}`} />;
+                })}</div>
+                <div className="price-range"><span>최저 ₩{won(historyLow)}</span><b>현재 ₩{won(selectedPriceHistory[selectedPriceHistory.length - 1])}</b><span>최고 ₩{won(historyHigh)}</span></div>
+              </div>
               <div className="recipe-formula"><b>{recipeDetail.ingredients}</b><i>→</i><b>{recipeDetail.building}</b><i>→</i><strong>{itemMeta[recipeDetail.item].label}</strong></div>
               <ol>{recipeDetail.steps.map((step, index) => <li key={step}><span>{index + 1}</span>{step}</li>)}</ol>
               <div className="recipe-requirement"><span>해금·작동 조건</span><b>{recipeDetail.requirement}</b></div>
@@ -374,7 +391,7 @@ export default function FactoryGame() {
         {tab === "status" && <div className="intel-scroll">
           <section className="efficiency-card"><div className="ring" style={{ "--value": `${efficiency * 3.6}deg` } as React.CSSProperties}><div><strong>{efficiency}%</strong><small>공장 효율</small></div></div><div className="eff-stats"><span><i className="orange" /> 병목 <b>{Math.max(0, 3 - Math.floor(contractNow / 8))}</b></span><span><i className="red" /> 멈춘 기계 <b>{Math.max(0, Object.values(game.buildings).filter(b => b.kind !== "conveyor" && b.progress > 5).length)}</b></span><span><i className="blue" /> 운송 중 <b>{game.items.length}</b></span></div></section>
           <section className="side-section"><div className="section-head"><h3>실시간 생산</h3><small>분당</small></div>{(["ironOre", "ironPlate", "gear", "wood"] as Item[]).map(type => <div className="resource-row" key={type}><span className="item-chip" style={{ color: itemMeta[type].color }}>{itemMeta[type].icon}</span><span><b>{itemMeta[type].label}</b><small>판매 {game.sold[type] || 0}</small></span><strong>+{Math.min(99, game.items.filter(i => i.type === type).length * 2)}<small>/m</small></strong></div>)}</section>
-          <section className="side-section"><div className="section-head"><h3>연구 레벨</h3><span className="status-live">LV.{game.researchLevel}</span></div><div className="research-card"><span>⌬</span><div><b>도시 기술 Lv.{game.researchLevel}</b><small>다음 해금: {game.researchLevel < 2 ? "조립기" : game.researchLevel < 3 ? "고속 컨베이어" : "구리 가공 시설"}</small><div className="progress"><i style={{ width: `${Math.min(100, game.research / (game.researchLevel * 40) * 100)}%` }} /></div></div><button className="research-up" disabled={game.research < game.researchLevel * 40} onClick={levelUpResearch}>레벨업<small>{game.researchLevel * 40} RP</small></button></div><div className="future-unlocks"><span>Lv.2 조립기</span><span>Lv.3 고속 물류</span><span>Lv.4 구리 설비</span></div></section>
+          <section className="side-section"><div className="section-head"><h3>연구 레벨</h3><span className="status-live">LV.{game.researchLevel}</span></div><div className="research-card"><span>⌬</span><div><b>도시 기술 Lv.{game.researchLevel}</b><small>다음 해금: {game.researchLevel < 2 ? "조립기" : game.researchLevel < 3 ? "고속 컨베이어" : "구리 가공 시설"}</small><small className="research-rate">연구소 1개당 8초에 1 RP</small><div className="progress"><i style={{ width: `${Math.min(100, game.research / researchCost(game.researchLevel) * 100)}%` }} /></div></div><button className="research-up" disabled={game.research < researchCost(game.researchLevel)} onClick={levelUpResearch}>레벨업<small>{researchCost(game.researchLevel)} RP</small></button></div><div className="future-unlocks"><span>Lv.2 조립기</span><span>Lv.3 고속 물류</span><span>Lv.4 구리 설비</span></div></section>
         </div>}
         {tab === "market" && <div className="intel-scroll"><section className="market-banner"><small>시장 브리핑</small><b>철강 수요가 상승 중입니다</b><span>가격은 12초마다 변동합니다.</span></section><section className="side-section"><div className="section-head"><h3>실시간 시세</h3><small>기준가 대비</small></div>{(Object.keys(itemMeta) as Item[]).map(type => { const rate = market[type]; return <div className="market-row" key={type}><span style={{ color: itemMeta[type].color }}>{itemMeta[type].icon}</span><div><b>{itemMeta[type].label}</b><small>₩{won(itemMeta[type].price * rate)}</small></div><em className={rate >= 1 ? "up" : "down"}>{rate >= 1 ? "▲" : "▼"} {Math.abs((rate - 1) * 100).toFixed(1)}%</em></div>})}</section></div>}
         {tab === "contract" && <div className="intel-scroll"><section className="contract-card"><div className="contract-top"><span>긴급</span><small>도시 건설국</small></div><h3>철도 보수용 철판</h3><p>신규 화물 노선에 사용할 철판을 납품해 주세요.</p><div className="contract-progress"><span><b>{Math.min(contractNow, 20)}</b> / 20 철판</span><small>{Math.min(100, contractNow / 20 * 100).toFixed(0)}%</small><div><i style={{ width: `${Math.min(100, contractNow / 20 * 100)}%` }} /></div></div><div className="rewards"><span><small>보상</small><b>₩3,500</b></span><span><small>추가</small><b>⌬ 20 RP</b></span></div><button disabled={contractNow < 20} onClick={claimContract}>계약 납품</button></section><section className="locked-contract"><span>▣</span><div><b>다음 계약</b><small>도시 레벨 2에서 공개</small></div></section></div>}
