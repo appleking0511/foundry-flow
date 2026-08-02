@@ -112,3 +112,24 @@ button:focus-visible { outline:2px solid var(--cyan); outline-offset:2px; }
   .recipe-book { max-height:96dvh; }.recipe-book>p { display:none; }.recipe-list article small { margin-top:3px; }.recipe-book>footer { display:none; }
   .structure-inspector { left:auto;right:8px;transform:none;width:360px;bottom:46px; }.process-flow { padding:5px; }.structure-inspector>p { display:none; }
 }
+
+.build-icon.powerPlant { color:#ffd45d;background:#3c3119;box-shadow:inset 0 0 10px #ffc83d22; }
+.build-icon.powerline { color:#69d7ee;background:#17343b; }
+.build-card.locked { opacity:.45;filter:grayscale(.6);cursor:not-allowed; }
+.unlock-badge { position:absolute;right:6px;bottom:5px;color:#b9a6f5;font-size:7px;font-style:normal;background:#2b2445;padding:2px 4px; }
+.placed.powerPlant { border-color:#e6af37;background:radial-gradient(circle,#6b4d1d,#29251d 65%); }
+.placed.powerPlant .machine-icon { animation:powerPulse 1s ease-in-out infinite alternate; }
+.placed.powerline { inset:12px;border:1px solid #50bdd5;background:linear-gradient(90deg,transparent 43%,#66d8ee 44% 56%,transparent 57%);box-shadow:0 0 9px #52cee655; }
+.placed.powered { box-shadow:0 0 18px #66d9edaa,inset 0 0 8px #57cfe622; }
+@keyframes powerPulse { to { filter:drop-shadow(0 0 7px #ffd85c); } }
+.inspector-actions button:disabled { border-color:#394345!important;background:#252c2d!important;color:#697476!important;cursor:not-allowed;filter:grayscale(1); }
+.inspector-actions button:disabled small { color:#5f6b6d!important; }
+.power-status { margin:7px 0;padding:6px 8px;border:1px solid #405055;background:#1b2527;color:#8b999b;font-size:8px; }
+.power-status.on { border-color:#347b70;background:#17312d;color:#68ddbe;box-shadow:inset 3px 0 0 #4fd0ad; }
+.power-status.heat { border-color:#8c5637;background:#32231d;color:#ffad77;box-shadow:inset 3px 0 0 #ef7948; }
+.power-status.off { border-color:#65413d;background:#2b1e1d;color:#db837a;box-shadow:inset 3px 0 0 #bd554c; }
+.research-card .research-up { border:1px solid #3e6d68;background:#1a3433;color:var(--cyan);padding:5px 7px;font-size:8px;border-radius:3px;cursor:pointer; }
+.research-card .research-up small { display:block;color:#73918f;font-size:6px; }
+.research-card .research-up:disabled { border-color:#344244;background:#242c2e;color:#606e70;cursor:not-allowed; }
+.future-unlocks { display:flex;gap:4px;margin-top:5px; }
+.future-unlocks span { flex:1;border:1px solid #2d3e41;background:#141e20;color:#667b7e;padding:4px 2px;text-align:center;font-size:6px; }
