@@ -2,16 +2,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Kind = "conveyor" | "fastConveyor" | "splitter" | "merger" | "drill" | "lumber" | "powerPlant" | "powerline" | "smelter" | "assembler" | "warehouse" | "largeWarehouse" | "seller" | "lab";
+type Kind = "conveyor" | "fastConveyor" | "splitter" | "merger" | "drill" | "lumber" | "powerPlant" | "powerline" | "smelter" | "assembler" | "warehouse" | "largeWarehouse" | "seller" | "cityDepot" | "lab";
 type Resource = "iron" | "tree" | "stone" | "coal" | "copper";
 type Item = "ironOre" | "wood" | "stone" | "coal" | "copperOre" | "ironPlate" | "gear";
 type Building = { kind: Kind; dir: number; progress: number; level?: number };
 type MovingItem = { id: number; type: Item; x: number; y: number };
+type CityProject = { name: string; icon: string; description: string; requirements: Partial<Record<Item, number>>; rewardMoney: number; rewardResearch: number; unlock: string };
 type GameState = {
   money: number; research: number; cityXp: number; buildings: Record<string, Building>;
   items: MovingItem[]; sold: Record<string, number>; inventory: Record<string, number>;
   sellerStatus: Record<string, { type: Item; lastPrice: number; count: number; revenue: number }>;
   lifetime: number; nextId: number; expanded: boolean; researchLevel: number; landTier: number;
+  cityProject: number; cityDeliveries: Record<string, number>; satisfaction: number;
 };
 
 const W = 18, H = 12;
@@ -45,6 +47,7 @@ const buildings: { kind: Kind; icon: string; name: string; cost: number; group: 
   { kind: "warehouse", icon: "▦", name: "창고", cost: 480, group: "물류", desc: "생산품을 임시 보관" },
   { kind: "largeWarehouse", icon: "▥", name: "대형 창고", cost: 1200, group: "물류", desc: "여러 생산라인을 잇는 대형 물류 거점" },
   { kind: "seller", icon: "₩", name: "판매소", cost: 0, group: "판매", desc: "무료 설치 · 도착한 물품을 자동 판매" },
+  { kind: "cityDepot", icon: "▰", name: "도시 납품소", cost: 0, group: "도시", desc: "무료 설치 · 생산품을 도시 프로젝트에 납품" },
   { kind: "lab", icon: "⌬", name: "연구소", cost: 2400, group: "연구", desc: "연구 포인트 자동 생산" },
 ];
 const buildingMeta = Object.fromEntries(buildings.map(b => [b.kind, b])) as Record<Kind, typeof buildings[number]>;
@@ -62,6 +65,7 @@ const productionMeta: Record<Kind, { input: string; output: string; note: string
   warehouse: { input: "모든 생산품", output: "보관·출고", note: "생산품을 받아 다음 라인으로 전달합니다." },
   largeWarehouse: { input: "여러 생산라인", output: "대량 보관·출고", note: "여러 라인을 연결하는 대형 물류 거점입니다." },
   seller: { input: "모든 생산품", output: "자동 판매", note: "시장 시세에 맞춰 물품을 즉시 판매합니다." },
+  cityDepot: { input: "도시 요구 생산품", output: "도시 건설 납품", note: "물품을 판매하지 않고 도시 프로젝트와 만족도 향상에 사용합니다." },
   lab: { input: "시간", output: "연구 포인트", note: "새 기술에 필요한 연구 포인트를 생산합니다." },
 };
 const recipeCatalog: { item: Item; building: string; ingredients: string; steps: string[]; requirement: string; tip: string }[] = [
@@ -70,14 +74,20 @@ const recipeCatalog: { item: Item; building: string; ingredients: string; steps:
   { item: "ironPlate", building: "용광로", ingredients: "철광석 1 + 원목 화력", steps: ["철광석 라인을 용광로로 연결", "다른 라인에서 원목을 용광로에 투입", "용광로 출구에 컨베이어 연결", "철판을 조립기 또는 판매소로 운송"], requirement: "연구 Lv.1 · 원목 1개로 화력 4 충전", tip: "철광석보다 단가가 높고 기어 제작 재료로도 사용됩니다." },
   { item: "gear", building: "조립기", ingredients: "철판 2", steps: ["연구소에서 연구 포인트 생산", "연구 Lv.2를 달성해 조립기 해금", "철판 라인을 조립기에 연결", "완성된 기어를 판매소로 운송"], requirement: "연구 Lv.2 · 철판 2개 필요", tip: "현재 기초 공장에서 만들 수 있는 가장 비싼 조립품입니다." },
 ];
-const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, sellerStatus: {}, lifetime: 0, nextId: 1, expanded: false, researchLevel: 1, landTier: 1 };
+const cityProjects: CityProject[] = [
+  { name: "개척 시청", icon: "▦", description: "정착민이 생활할 첫 행정 중심지를 건설합니다.", requirements: { wood: 24, ironPlate: 12 }, rewardMoney: 1800, rewardResearch: 15, unlock: "도시 계약과 만족도 보너스" },
+  { name: "산업 철도역", icon: "▤", description: "대량 화물을 실어 나를 도시 철도망을 완성합니다.", requirements: { ironPlate: 50, gear: 12 }, rewardMoney: 4200, rewardResearch: 30, unlock: "동부 산업 구역 구매 권한" },
+  { name: "도시 전력망", icon: "⚡", description: "공장과 주거지를 연결하는 안정적인 전력망을 구축합니다.", requirements: { wood: 45, ironPlate: 80, gear: 24 }, rewardMoney: 7500, rewardResearch: 50, unlock: "광물 탐사 구역과 고속 물류" },
+  { name: "중앙 산업단지", icon: "▥", description: "도시 전체 생산을 책임지는 거대 산업단지를 건설합니다.", requirements: { ironPlate: 160, gear: 70 }, rewardMoney: 14000, rewardResearch: 80, unlock: "Lv.4 구리·전기 산업 준비" },
+];
+const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, sellerStatus: {}, lifetime: 0, nextId: 1, expanded: false, researchLevel: 1, landTier: 1, cityProject: 0, cityDeliveries: {}, satisfaction: 70 };
 const key = (x: number, y: number) => `${x},${y}`;
 const won = (n: number) => new Intl.NumberFormat("ko-KR").format(Math.floor(n));
 const researchCost = (level: number) => 80 + (level - 1) * 70;
 const upgradeCost = (kind: Kind, level: number) => Math.floor(Math.max(250, buildingMeta[kind].cost * (.55 + level * .2)));
 const unlockLevel: Partial<Record<Kind, number>> = { assembler: 2, fastConveyor: 3, splitter: 3, merger: 3, largeWarehouse: 3, lab: 1 };
-const noUpgrade = new Set<Kind>(["warehouse", "largeWarehouse", "seller", "powerline", "lab", "splitter", "merger"]);
-const noDirection = new Set<Kind>(["lab", "powerPlant", "powerline", "seller"]);
+const noUpgrade = new Set<Kind>(["warehouse", "largeWarehouse", "seller", "cityDepot", "powerline", "lab", "splitter", "merger"]);
+const noDirection = new Set<Kind>(["lab", "powerPlant", "powerline", "seller", "cityDepot"]);
 const landPlans = [{ tier: 2, name: "동부 산업 구역", maxX: 13, requiredLevel: 2, cost: 4000 }, { tier: 3, name: "광물 탐사 구역", maxX: 17, requiredLevel: 3, cost: 9000 }];
 const landMaxX = (tier: number) => tier <= 1 ? 9 : tier === 2 ? 13 : 17;
 
@@ -108,7 +118,7 @@ export default function FactoryGame() {
   const [market, setMarket] = useState<Record<Item, number>>(() => Object.fromEntries(Object.keys(itemMeta).map(k => [k, 1])) as Record<Item, number>);
   const [marketHistory, setMarketHistory] = useState<Record<Item, number[]>>(() => Object.fromEntries((Object.keys(itemMeta) as Item[]).map(type => [type, Array(8).fill(itemMeta[type].price)])) as Record<Item, number[]>);
   const [toast, setToast] = useState("철광기에 컨베이어를 연결해 생산을 시작하세요");
-  const [tab, setTab] = useState<"status" | "market" | "contract">("status");
+  const [tab, setTab] = useState<"status" | "market" | "contract" | "city">("status");
   const [mobilePanel, setMobilePanel] = useState<"build" | "intel" | null>(null);
   const [inspectorPos, setInspectorPos] = useState<string | null>(null);
   const [recipeOpen, setRecipeOpen] = useState(false);
@@ -186,7 +196,7 @@ export default function FactoryGame() {
 
   const tick = useCallback(() => setGame(prev => {
     if (paused || !started) return prev;
-    const g: GameState = { ...prev, buildings: { ...prev.buildings }, items: prev.items.map(i => ({ ...i })), sold: { ...prev.sold }, inventory: { ...prev.inventory }, sellerStatus: { ...prev.sellerStatus }, lifetime: prev.lifetime + .5 };
+    const g: GameState = { ...prev, buildings: { ...prev.buildings }, items: prev.items.map(i => ({ ...i })), sold: { ...prev.sold }, inventory: { ...prev.inventory }, sellerStatus: { ...prev.sellerStatus }, cityDeliveries: { ...(prev.cityDeliveries || {}) }, satisfaction: Math.max(25, (prev.satisfaction ?? 70) - .008), lifetime: prev.lifetime + .5 };
     for (const [pos, b] of Object.entries(g.buildings)) if (b.kind === "powerPlant" && (g.inventory[`fuel:${pos}`] || 0) > 0) g.inventory[`fuel:${pos}`] = Math.max(0, g.inventory[`fuel:${pos}`] - .25);
     const powered = poweredNetwork(g.buildings, g.inventory);
     const occupied = new Map(g.items.map(i => [key(i.x, i.y), i]));
@@ -229,8 +239,16 @@ export default function FactoryGame() {
       if (b.kind === "smelter" && item.type === "ironOre") {
         g.inventory[`ore:${machinePos}`] = (g.inventory[`ore:${machinePos}`] || 0) + 1; toRemove.add(item.id); occupied.delete(machinePos); continue;
       }
+      if (b.kind === "cityDepot") {
+        const project = cityProjects[g.cityProject || 0], required = project?.requirements[item.type] || 0, delivered = g.cityDeliveries[item.type] || 0;
+        if (required > delivered) g.cityDeliveries[item.type] = Math.min(required, delivered + 1);
+        else g.inventory[`cityReserve:${item.type}`] = (g.inventory[`cityReserve:${item.type}`] || 0) + 1;
+        g.satisfaction = Math.min(100, g.satisfaction + (required > delivered ? .8 : .25)); xp += required > delivered ? 2 : .5;
+        toRemove.add(item.id); occupied.delete(machinePos); continue;
+      }
       if (b.kind === "seller") {
-        const value = itemMeta[item.type].price * market[item.type];
+        const cityBonus = 1 + Math.max(0, g.satisfaction - 60) / 200;
+        const value = itemMeta[item.type].price * market[item.type] * cityBonus;
         const previousSale = g.sellerStatus[machinePos];
         g.sellerStatus[machinePos] = { type: item.type, lastPrice: value, count: (previousSale?.count || 0) + 1, revenue: (previousSale?.revenue || 0) + value };
         earned += value; xp += Math.max(1, value / 25); g.sold[item.type] = (g.sold[item.type] || 0) + 1; toRemove.add(item.id); occupied.delete(machinePos); continue;
@@ -284,6 +302,7 @@ export default function FactoryGame() {
       const meta = buildingMeta[selected];
       if (g.buildings[pos]) { setInspectorPos(pos); setToast("구조물 관리창을 열었습니다"); return g; }
       if (g.money < meta.cost) { setToast("자금이 부족합니다"); return g; }
+      if (selected === "cityDepot" && Object.values(g.buildings).some(building => building.kind === "cityDepot")) { setToast("도시 납품소는 한 곳만 설치할 수 있습니다"); return g; }
       if (selected === "drill" && resources[pos] !== "iron") { setToast("철광기는 철광맥 위에만 설치할 수 있습니다"); return g; }
       if (selected === "lumber" && resources[pos] !== "tree") { setToast("벌목기는 나무 위에만 설치할 수 있습니다"); return g; }
       setToast(`${meta.name} 설치 완료 · R 키로 방향 전환`);
@@ -297,10 +316,10 @@ export default function FactoryGame() {
     const productive = all.filter(b => b.kind === "conveyor" || b.progress < 3.5).length;
     return Math.min(98, Math.round(38 + productive / all.length * 52 + Math.min(8, game.sold.ironPlate || 0)));
   }, [game.buildings, game.sold]);
-  const cityLevel = Math.min(6, 1 + Math.floor(game.cityXp / 120));
+  const cityLevel = Math.min(10, Math.max(1 + (game.cityProject || 0), 1 + Math.floor(game.cityXp / 240)));
   const contractNow = game.sold.ironPlate || 0;
   const nextLand = landPlans.find(plan => plan.tier === (game.landTier || 1) + 1);
-  const groups = ["채집", "전력", "운송", "가공", "물류", "판매", "연구"];
+  const groups = ["채집", "전력", "운송", "가공", "물류", "판매", "도시", "연구"];
   const itemAt = new Map(game.items.map(i => [key(i.x, i.y), i]));
   const inspected = inspectorPos ? game.buildings[inspectorPos] : undefined;
   const inspectedInfo = inspected ? productionMeta[inspected.kind] : undefined;
@@ -312,6 +331,11 @@ export default function FactoryGame() {
   const historyChange = selectedPriceHistory[selectedPriceHistory.length - 1] - selectedPriceHistory[0];
   const activeProduction = Array.from(new Set(Object.values(game.buildings).map(b => productionMeta[b.kind].output).filter(v => !v.includes("운송") && !v.includes("보관") && !v.includes("판매"))));
   const livePower = poweredNetwork(game.buildings, game.inventory);
+  const currentCityProject = cityProjects[game.cityProject || 0];
+  const cityRequirementEntries = currentCityProject ? Object.entries(currentCityProject.requirements) as [Item, number][] : [];
+  const cityProjectComplete = !!currentCityProject && cityRequirementEntries.every(([type, amount]) => (game.cityDeliveries?.[type] || 0) >= amount);
+  const cityProjectProgress = currentCityProject ? cityRequirementEntries.reduce((sum, [type, amount]) => sum + Math.min(1, (game.cityDeliveries?.[type] || 0) / amount), 0) / Math.max(1, cityRequirementEntries.length) * 100 : 100;
+  const citySaleBonus = Math.max(0, (game.satisfaction ?? 70) - 60) / 2;
 
   const rotateAt = (pos: string) => setGame(g => {
     const b = g.buildings[pos]; if (!b) return g;
@@ -349,6 +373,13 @@ export default function FactoryGame() {
     setToast(`${plan.name} 확보 완료 · 필드가 확장되었습니다`);
     return { ...g, money: g.money - plan.cost, landTier: plan.tier };
   });
+  const completeCityProject = () => setGame(g => {
+    const project = cityProjects[g.cityProject || 0]; if (!project) { setToast("현재 공개된 도시 프로젝트를 모두 완료했습니다"); return g; }
+    const complete = (Object.entries(project.requirements) as [Item, number][]).every(([type, amount]) => (g.cityDeliveries?.[type] || 0) >= amount);
+    if (!complete) { setToast("도시 프로젝트에 필요한 물품이 부족합니다"); return g; }
+    playSfx("upgrade"); setToast(`${project.name} 완공! ${project.unlock} 해금`);
+    return { ...g, money: g.money + project.rewardMoney, research: g.research + project.rewardResearch, cityXp: g.cityXp + 240, cityProject: (g.cityProject || 0) + 1, cityDeliveries: {}, satisfaction: Math.min(100, (g.satisfaction ?? 70) + 10) };
+  });
 
   const save = () => { localStorage.setItem("factory-flow-save", JSON.stringify({ ...game, items: [] })); setToast("게임을 저장했습니다"); };
   const claimContract = () => {
@@ -370,7 +401,7 @@ export default function FactoryGame() {
       <div className="brand"><span className="brand-mark">F</span><div><b>FOUNDRY FLOW</b><small>자동화 도시 건설국</small></div></div>
       <div className="top-stats">
         <div><small>보유 자금</small><strong>₩ {won(game.money)}</strong><em>+{won((game.sold.ironPlate || 0) * itemMeta.ironPlate.price)} 누적</em></div>
-        <div><small>도시 성장</small><strong>LV.{cityLevel} 제조 도시</strong><span className="mini-track"><i style={{ width: `${game.cityXp % 120 / 1.2}%` }} /></span></div>
+        <div><small>도시 성장</small><strong>LV.{cityLevel} 제조 도시</strong><span className="mini-track"><i style={{ width: `${currentCityProject ? cityProjectProgress : 100}%` }} /></span></div>
         <div><small>연구 포인트</small><strong className="cyan">⌬ {won(game.research)} RP</strong><em>연구소 {Object.values(game.buildings).filter(b => b.kind === "lab").length}동</em></div>
       </div>
       <div className="header-actions"><button onClick={toggleSound} title={muted ? "소리 켜기" : "음소거"}>{muted ? "🔇" : "🔊"}</button><button onClick={save}>저장</button><button onClick={() => { if (confirm("저장 데이터를 초기화할까요?")) { localStorage.removeItem("factory-flow-save"); setGame(initial); } }}>↻</button></div>
@@ -427,6 +458,7 @@ export default function FactoryGame() {
           {inspected.kind === "drill" && <div className={`power-status ${livePower.has(inspectorPos) ? "on" : "off"}`}>⚡ {livePower.has(inspectorPos) ? "전력 공급 중 · 정상 채굴" : "전력 없음 · 발전기와 전선을 연결하세요"}</div>}
           {inspected.kind === "powerPlant" && <div className={`power-status ${(game.inventory[`fuel:${inspectorPos}`] || 0) > 0 ? "on" : "off"}`}>♠ 원목 연료 {Math.floor(game.inventory[`fuel:${inspectorPos}`] || 0)} · {(game.inventory[`fuel:${inspectorPos}`] || 0) > 0 ? "발전 중" : "컨베이어로 원목을 공급하세요"}</div>}
           {inspected.kind === "smelter" && <div className={`power-status ${(game.inventory[`heat:${inspectorPos}`] || 0) > 0 ? "heat" : "off"}`}>♨ 화력 {Math.floor(game.inventory[`heat:${inspectorPos}`] || 0)} · ◆ 철광석 {Math.floor(game.inventory[`ore:${inspectorPos}`] || 0)} · {(game.inventory[`heat:${inspectorPos}`] || 0) <= 0 ? "원목을 공급하세요" : (game.inventory[`ore:${inspectorPos}`] || 0) <= 0 ? "철광석을 공급하세요" : "철판 제련 중"}</div>}
+          {inspected.kind === "cityDepot" && <div className="city-depot-status"><span>도시 만족도 <b>{Math.round(game.satisfaction ?? 70)}%</b></span><strong>{currentCityProject ? `${currentCityProject.icon} ${currentCityProject.name} 납품 중` : "✓ 공개 프로젝트 완료"}</strong><button onClick={() => { setTab("city"); setMobilePanel("intel"); setInspectorPos(null); }}>도시 목표 보기</button></div>}
           {inspected.kind === "seller" && <div className="seller-report">
             <div className="seller-report-head"><span>자동 판매 현황</span><em className={inspectedSale ? "live" : "waiting"}>{inspectedSale ? "판매 중" : "대기 중"}</em></div>
             {inspectedSale ? <>
@@ -481,7 +513,7 @@ export default function FactoryGame() {
       </section>
 
       <aside className={`intel-panel panel ${mobilePanel === "intel" ? "mobile-open" : ""}`}>
-        <div className="tabs"><button className={tab === "status" ? "active" : ""} onClick={() => setTab("status")}>현황</button><button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>시장</button><button className={tab === "contract" ? "active" : ""} onClick={() => setTab("contract")}>계약 <i /></button></div>
+        <div className="tabs"><button className={tab === "status" ? "active" : ""} onClick={() => setTab("status")}>현황</button><button className={tab === "city" ? "active" : ""} onClick={() => setTab("city")}>도시 <i /></button><button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>시장</button><button className={tab === "contract" ? "active" : ""} onClick={() => setTab("contract")}>계약</button></div>
         <div className="income-live"><span><i />실시간 수익<small>최근 5초 평균</small></span><strong>₩{won(incomePerSecond)}<small>/초</small></strong></div>
         {tab === "status" && <div className="intel-scroll">
           <section className="efficiency-card"><div className="ring" style={{ "--value": `${efficiency * 3.6}deg` } as React.CSSProperties}><div><strong>{efficiency}%</strong><small>공장 효율</small></div></div><div className="eff-stats"><span><i className="orange" /> 병목 <b>{Math.max(0, 3 - Math.floor(contractNow / 8))}</b></span><span><i className="red" /> 멈춘 기계 <b>{Math.max(0, Object.values(game.buildings).filter(b => b.kind !== "conveyor" && b.progress > 5).length)}</b></span><span><i className="blue" /> 운송 중 <b>{game.items.length}</b></span></div></section>
@@ -489,6 +521,19 @@ export default function FactoryGame() {
           <section className="side-section"><div className="section-head"><h3>연구 레벨</h3><span className="status-live">LV.{game.researchLevel}</span></div><div className="research-card"><span>⌬</span><div><b>도시 기술 Lv.{game.researchLevel}</b><small>다음 해금: {game.researchLevel < 2 ? "조립기·동부 부지" : game.researchLevel < 3 ? "고속 물류·광물 부지" : game.researchLevel < 4 ? "구리·전기 산업" : "정밀 부품 산업"}</small><small className="research-rate">연구소 1개당 8초에 1 RP</small><div className="progress"><i style={{ width: `${Math.min(100, game.research / researchCost(game.researchLevel) * 100)}%` }} /></div></div><button className="research-up" disabled={game.research < researchCost(game.researchLevel)} onClick={levelUpResearch}>레벨업<small>{researchCost(game.researchLevel)} RP</small></button></div><div className="research-roadmap"><span className={game.researchLevel >= 3 ? "done" : ""}><b>Lv.3</b>고속 물류</span><span className={game.researchLevel >= 4 ? "done" : ""}><b>Lv.4</b>구리·전기</span><span className={game.researchLevel >= 5 ? "done" : ""}><b>Lv.5</b>정밀 부품</span><span className={game.researchLevel >= 7 ? "done" : ""}><b>Lv.7</b>자동차</span><span className={game.researchLevel >= 10 ? "done" : ""}><b>Lv.10</b>우주 산업</span></div></section>
         </div>}
         {tab === "market" && <div className="intel-scroll"><section className="market-banner"><small>시장 브리핑</small><b>철강 수요가 상승 중입니다</b><span>가격은 12초마다 변동합니다.</span></section><section className="side-section"><div className="section-head"><h3>실시간 시세</h3><small>기준가 대비</small></div>{(Object.keys(itemMeta) as Item[]).map(type => { const rate = market[type]; return <div className="market-row" key={type}><span style={{ color: itemMeta[type].color }}>{itemMeta[type].icon}</span><div><b>{itemMeta[type].label}</b><small>₩{won(itemMeta[type].price * rate)}</small></div><em className={rate >= 1 ? "up" : "down"}>{rate >= 1 ? "▲" : "▼"} {Math.abs((rate - 1) * 100).toFixed(1)}%</em></div>})}</section></div>}
+        {tab === "city" && <div className="intel-scroll city-intel">
+          <section className="city-overview"><div><small>도시 만족도</small><strong>{Math.round(game.satisfaction ?? 70)}%</strong><div><i style={{ width: `${game.satisfaction ?? 70}%` }} /></div></div><span><small>판매 가격 보너스</small><b>+{citySaleBonus.toFixed(1)}%</b></span></section>
+          {!Object.values(game.buildings).some(building => building.kind === "cityDepot") && <section className="depot-warning"><span>▰</span><div><b>도시 납품소가 필요합니다</b><small>건설 메뉴의 도시 항목에서 무료로 설치하고 컨베이어를 연결하세요.</small></div></section>}
+          {currentCityProject ? <section className="city-project-card">
+            <header><span>{currentCityProject.icon}</span><div><small>CITY PROJECT · PHASE {(game.cityProject || 0) + 1}</small><h3>{currentCityProject.name}</h3></div><em>{Math.round(cityProjectProgress)}%</em></header>
+            <p>{currentCityProject.description}</p>
+            <div className="city-project-track"><i style={{ width: `${cityProjectProgress}%` }} /></div>
+            <div className="city-requirements">{cityRequirementEntries.map(([type, amount]) => { const delivered = game.cityDeliveries?.[type] || 0; return <div key={type}><span style={{ color: itemMeta[type].color }}>{itemMeta[type].icon}</span><p><b>{itemMeta[type].label}</b><small>{Math.min(delivered, amount)} / {amount} 납품</small></p><em className={delivered >= amount ? "done" : ""}>{delivered >= amount ? "완료" : `${Math.round(delivered / amount * 100)}%`}</em></div>})}</div>
+            <div className="city-rewards"><span><small>완공 보상</small><b>₩{won(currentCityProject.rewardMoney)} · ⌬ {currentCityProject.rewardResearch} RP</b></span><p><small>해금</small><strong>{currentCityProject.unlock}</strong></p></div>
+            <button disabled={!cityProjectComplete} onClick={completeCityProject}>{cityProjectComplete ? "프로젝트 완공" : "물품 납품 진행 중"}</button>
+          </section> : <section className="city-finale"><span>✓</span><h3>현재 도시 프로젝트 완료</h3><p>다음 산업 업데이트가 준비될 때까지 만족도를 유지하고 공장을 확장하세요.</p></section>}
+          <section className="city-roadmap"><h3>도시 개발 계획</h3>{cityProjects.map((project, index) => <div key={project.name} className={index < (game.cityProject || 0) ? "done" : index === (game.cityProject || 0) ? "active" : ""}><span>{index < (game.cityProject || 0) ? "✓" : project.icon}</span><p><b>PHASE {index + 1} · {project.name}</b><small>{project.unlock}</small></p></div>)}</section>
+        </div>}
         {tab === "contract" && <div className="intel-scroll"><section className="contract-card"><div className="contract-top"><span>긴급</span><small>도시 건설국</small></div><h3>철도 보수용 철판</h3><p>신규 화물 노선에 사용할 철판을 납품해 주세요.</p><div className="contract-progress"><span><b>{Math.min(contractNow, 20)}</b> / 20 철판</span><small>{Math.min(100, contractNow / 20 * 100).toFixed(0)}%</small><div><i style={{ width: `${Math.min(100, contractNow / 20 * 100)}%` }} /></div></div><div className="rewards"><span><small>보상</small><b>₩3,500</b></span><span><small>추가</small><b>⌬ 20 RP</b></span></div><button disabled={contractNow < 20} onClick={claimContract}>계약 납품</button></section><section className="locked-contract"><span>▣</span><div><b>다음 계약</b><small>도시 레벨 2에서 공개</small></div></section></div>}
       </aside>
     </section>
