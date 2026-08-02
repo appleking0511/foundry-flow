@@ -143,6 +143,13 @@ export default function FactoryGame() {
         }
       }
       if (b.kind === "lab" && b.progress >= 2) { researchGain += 1; b.progress = 0; }
+      if (b.kind === "smelter" && b.progress >= 2 && (g.inventory[`ore:${pos}`] || 0) >= 1 && (g.inventory[`heat:${pos}`] || 0) >= 1 && g.buildings[key(nx, ny)] && !occupied.has(key(nx, ny))) {
+        const ni = { id: g.nextId++, type: "ironPlate" as Item, x: nx, y: ny };
+        spawned.push(ni); occupied.set(key(nx, ny), ni);
+        g.inventory[`ore:${pos}`] = Math.max(0, (g.inventory[`ore:${pos}`] || 0) - 1);
+        g.inventory[`heat:${pos}`] = Math.max(0, (g.inventory[`heat:${pos}`] || 0) - 1);
+        b.progress = 0;
+      }
     }
 
     const shuffled = [...g.items].sort((a, b) => b.x + b.y - a.x - a.y);
@@ -156,17 +163,14 @@ export default function FactoryGame() {
       if (b.kind === "smelter" && item.type === "wood") {
         g.inventory[`heat:${machinePos}`] = (g.inventory[`heat:${machinePos}`] || 0) + 4; toRemove.add(item.id); occupied.delete(machinePos); continue;
       }
+      if (b.kind === "smelter" && item.type === "ironOre") {
+        g.inventory[`ore:${machinePos}`] = (g.inventory[`ore:${machinePos}`] || 0) + 1; toRemove.add(item.id); occupied.delete(machinePos); continue;
+      }
       if (b.kind === "seller") {
         const value = itemMeta[item.type].price * market[item.type];
         const previousSale = g.sellerStatus[machinePos];
         g.sellerStatus[machinePos] = { type: item.type, lastPrice: value, count: (previousSale?.count || 0) + 1, revenue: (previousSale?.revenue || 0) + value };
         earned += value; xp += Math.max(1, value / 25); g.sold[item.type] = (g.sold[item.type] || 0) + 1; toRemove.add(item.id); occupied.delete(machinePos); continue;
-      }
-      if (b.kind === "smelter" && item.type === "ironOre") {
-        if ((g.inventory[`heat:${machinePos}`] || 0) < 1) continue;
-        if ((item as MovingItem & { wait?: number }).wait === undefined) (item as MovingItem & { wait?: number }).wait = 0;
-        const ii = item as MovingItem & { wait?: number }; ii.wait = (ii.wait || 0) + .5 * (1 + ((b.level || 1) - 1) * .25);
-        if (ii.wait < 2) continue; item.type = "ironPlate"; g.inventory[`heat:${machinePos}`] = Math.max(0, (g.inventory[`heat:${machinePos}`] || 0) - 1);
       }
       if (b.kind === "assembler" && item.type === "ironPlate") {
         const stored = g.inventory._assembly || 0;
@@ -319,7 +323,7 @@ export default function FactoryGame() {
           <p>{inspectedInfo.note}</p>
           {inspected.kind === "drill" && <div className={`power-status ${livePower.has(inspectorPos) ? "on" : "off"}`}>⚡ {livePower.has(inspectorPos) ? "전력 공급 중 · 정상 채굴" : "전력 없음 · 발전기와 전선을 연결하세요"}</div>}
           {inspected.kind === "powerPlant" && <div className={`power-status ${(game.inventory[`fuel:${inspectorPos}`] || 0) > 0 ? "on" : "off"}`}>♠ 원목 연료 {Math.floor(game.inventory[`fuel:${inspectorPos}`] || 0)} · {(game.inventory[`fuel:${inspectorPos}`] || 0) > 0 ? "발전 중" : "컨베이어로 원목을 공급하세요"}</div>}
-          {inspected.kind === "smelter" && <div className={`power-status ${(game.inventory[`heat:${inspectorPos}`] || 0) > 0 ? "heat" : "off"}`}>♨ 화력 {Math.floor(game.inventory[`heat:${inspectorPos}`] || 0)} · {(game.inventory[`heat:${inspectorPos}`] || 0) > 0 ? "제련 가능" : "컨베이어로 원목을 공급하세요"}</div>}
+          {inspected.kind === "smelter" && <div className={`power-status ${(game.inventory[`heat:${inspectorPos}`] || 0) > 0 ? "heat" : "off"}`}>♨ 화력 {Math.floor(game.inventory[`heat:${inspectorPos}`] || 0)} · ◆ 철광석 {Math.floor(game.inventory[`ore:${inspectorPos}`] || 0)} · {(game.inventory[`heat:${inspectorPos}`] || 0) <= 0 ? "원목을 공급하세요" : (game.inventory[`ore:${inspectorPos}`] || 0) <= 0 ? "철광석을 공급하세요" : "철판 제련 중"}</div>}
           {inspected.kind === "seller" && <div className="seller-report">
             <div className="seller-report-head"><span>자동 판매 현황</span><em className={inspectedSale ? "live" : "waiting"}>{inspectedSale ? "판매 중" : "대기 중"}</em></div>
             {inspectedSale ? <>
