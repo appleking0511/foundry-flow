@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 type Kind = "conveyor" | "drill" | "lumber" | "smelter" | "assembler" | "warehouse" | "seller" | "lab";
 type Resource = "iron" | "tree" | "stone" | "coal" | "copper";
 type Item = "ironOre" | "wood" | "stone" | "coal" | "copperOre" | "ironPlate" | "gear";
-type Building = { kind: Kind; dir: number; progress: number };
+type Building = { kind: Kind; dir: number; progress: number; level?: number };
 type MovingItem = { id: number; type: Item; x: number; y: number };
 type GameState = {
   money: number; research: number; cityXp: number; buildings: Record<string, Building>;
@@ -37,19 +37,29 @@ const buildings: { kind: Kind; icon: string; name: string; cost: number; group: 
   { kind: "smelter", icon: "♨", name: "용광로", cost: 650, group: "가공", desc: "철광석을 철판으로 제련" },
   { kind: "assembler", icon: "⚙", name: "조립기", cost: 1400, group: "가공", desc: "철판 2개로 기어 조립" },
   { kind: "warehouse", icon: "▦", name: "창고", cost: 480, group: "물류", desc: "생산품을 임시 보관" },
-  { kind: "seller", icon: "₩", name: "판매소", cost: 900, group: "판매", desc: "도착한 물품을 자동 판매" },
+  { kind: "seller", icon: "₩", name: "판매소", cost: 0, group: "판매", desc: "무료 설치 · 도착한 물품을 자동 판매" },
   { kind: "lab", icon: "⌬", name: "연구소", cost: 2400, group: "연구", desc: "연구 포인트 자동 생산" },
 ];
 const buildingMeta = Object.fromEntries(buildings.map(b => [b.kind, b])) as Record<Kind, typeof buildings[number]>;
+const productionMeta: Record<Kind, { input: string; output: string; note: string }> = {
+  conveyor: { input: "도착한 물품", output: "다음 칸 운송", note: "화살표 방향으로 모든 물품을 이동합니다." },
+  drill: { input: "철광맥", output: "철광석", note: "철광맥 위에서 철광석을 자동 채굴합니다." },
+  lumber: { input: "산림", output: "원목", note: "나무 위에서 원목을 자동 생산합니다." },
+  smelter: { input: "철광석", output: "철판", note: "철광석을 가치가 높은 철판으로 제련합니다." },
+  assembler: { input: "철판 2개", output: "기어", note: "철판을 조립해 고가의 기어를 생산합니다." },
+  warehouse: { input: "모든 생산품", output: "보관·출고", note: "생산품을 받아 다음 라인으로 전달합니다." },
+  seller: { input: "모든 생산품", output: "자동 판매", note: "시장 시세에 맞춰 물품을 즉시 판매합니다." },
+  lab: { input: "시간", output: "연구 포인트", note: "새 기술에 필요한 연구 포인트를 생산합니다." },
+};
 const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, lifetime: 0, nextId: 1, expanded: false };
 const key = (x: number, y: number) => `${x},${y}`;
 const won = (n: number) => new Intl.NumberFormat("ko-KR").format(Math.floor(n));
+const upgradeCost = (kind: Kind, level: number) => Math.floor(Math.max(250, buildingMeta[kind].cost * (.55 + level * .2)));
 
 export default function FactoryGame() {
   const [game, setGame] = useState<GameState>(initial);
   const [selected, setSelected] = useState<Kind | "delete" | "rotate">("conveyor");
   const [rotation, setRotation] = useState(0);
-  const [speed, setSpeed] = useState(1);
   const [paused, setPaused] = useState(false);
   const [zoom, setZoom] = useState(.82);
   const [pan, setPan] = useState({ x: 28, y: 20 });
@@ -57,6 +67,8 @@ export default function FactoryGame() {
   const [toast, setToast] = useState("철광기에 컨베이어를 연결해 생산을 시작하세요");
   const [tab, setTab] = useState<"status" | "market" | "contract">("status");
   const [mobilePanel, setMobilePanel] = useState<"build" | "intel" | null>(null);
+  const [inspectorPos, setInspectorPos] = useState<string | null>(null);
+  const [recipeOpen, setRecipeOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const down = useRef<{ x: number; y: number } | null>(null);
@@ -78,14 +90,15 @@ export default function FactoryGame() {
 
   const tick = useCallback(() => setGame(prev => {
     if (paused) return prev;
-    const g: GameState = { ...prev, buildings: { ...prev.buildings }, items: prev.items.map(i => ({ ...i })), sold: { ...prev.sold }, inventory: { ...prev.inventory }, lifetime: prev.lifetime + .5 * speed };
+    const g: GameState = { ...prev, buildings: { ...prev.buildings }, items: prev.items.map(i => ({ ...i })), sold: { ...prev.sold }, inventory: { ...prev.inventory }, lifetime: prev.lifetime + .5 };
     const occupied = new Map(g.items.map(i => [key(i.x, i.y), i]));
     const toRemove = new Set<number>();
     const spawned: MovingItem[] = [];
     let earned = 0, xp = 0, researchGain = 0;
 
     for (const [pos, b0] of Object.entries(g.buildings)) {
-      const [x, y] = pos.split(",").map(Number), b = { ...b0, progress: b0.progress + .5 * speed };
+      const levelBoost = 1 + ((b0.level || 1) - 1) * .25;
+      const [x, y] = pos.split(",").map(Number), b = { ...b0, progress: b0.progress + .5 * levelBoost };
       g.buildings[pos] = b;
       const out = DIRS[b.dir], nx = x + out.x, ny = y + out.y;
       if ((b.kind === "drill" || b.kind === "lumber") && b.progress >= (b.kind === "drill" ? 2.5 : 3)) {
@@ -106,7 +119,7 @@ export default function FactoryGame() {
       }
       if (b.kind === "smelter" && item.type === "ironOre") {
         if ((item as MovingItem & { wait?: number }).wait === undefined) (item as MovingItem & { wait?: number }).wait = 0;
-        const ii = item as MovingItem & { wait?: number }; ii.wait = (ii.wait || 0) + .5 * speed;
+        const ii = item as MovingItem & { wait?: number }; ii.wait = (ii.wait || 0) + .5 * (1 + ((b.level || 1) - 1) * .25);
         if (ii.wait < 2) continue; item.type = "ironPlate";
       }
       if (b.kind === "assembler" && item.type === "ironPlate") {
@@ -122,7 +135,7 @@ export default function FactoryGame() {
     g.items = g.items.filter(i => !toRemove.has(i.id)).concat(spawned).slice(-160);
     g.money += earned; g.cityXp += xp; g.research += researchGain;
     return g;
-  }), [market, paused, speed]);
+  }), [market, paused]);
   useEffect(() => { const id = setInterval(tick, 500); return () => clearInterval(id); }, [tick]);
 
   const place = (x: number, y: number) => {
@@ -141,12 +154,12 @@ export default function FactoryGame() {
         return { ...g, money: g.money + buildingMeta[g.buildings[pos].kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos) };
       }
       const meta = buildingMeta[selected];
-      if (g.buildings[pos]) { setToast("이미 건물이 있는 타일입니다"); return g; }
+      if (g.buildings[pos]) { setInspectorPos(pos); setToast("구조물 관리창을 열었습니다"); return g; }
       if (g.money < meta.cost) { setToast("자금이 부족합니다"); return g; }
       if (selected === "drill" && resources[pos] !== "iron") { setToast("철광기는 철광맥 위에만 설치할 수 있습니다"); return g; }
       if (selected === "lumber" && resources[pos] !== "tree") { setToast("벌목기는 나무 위에만 설치할 수 있습니다"); return g; }
       setToast(`${meta.name} 설치 완료 · R 키로 방향 전환`);
-      return { ...g, money: g.money - meta.cost, buildings: { ...g.buildings, [pos]: { kind: selected, dir: rotation, progress: 0 } } };
+      return { ...g, money: g.money - meta.cost, buildings: { ...g.buildings, [pos]: { kind: selected, dir: rotation, progress: 0, level: 1 } } };
     });
   };
 
@@ -159,6 +172,27 @@ export default function FactoryGame() {
   const contractNow = game.sold.ironPlate || 0;
   const groups = ["채집", "운송", "가공", "물류", "판매", "연구"];
   const itemAt = new Map(game.items.map(i => [key(i.x, i.y), i]));
+  const inspected = inspectorPos ? game.buildings[inspectorPos] : undefined;
+  const inspectedInfo = inspected ? productionMeta[inspected.kind] : undefined;
+  const activeProduction = Array.from(new Set(Object.values(game.buildings).map(b => productionMeta[b.kind].output).filter(v => !v.includes("운송") && !v.includes("보관") && !v.includes("판매"))));
+
+  const rotateAt = (pos: string) => setGame(g => {
+    const b = g.buildings[pos]; if (!b) return g;
+    const dir = (b.dir + 1) % 4; setToast(`${buildingMeta[b.kind].name} 방향 ${DIRS[dir].icon}`);
+    return { ...g, buildings: { ...g.buildings, [pos]: { ...b, dir } } };
+  });
+  const deleteAt = (pos: string) => setGame(g => {
+    const b = g.buildings[pos]; if (!b) return g;
+    setInspectorPos(null); setToast(`${buildingMeta[b.kind].name} 철거 · 비용 50% 회수`);
+    return { ...g, money: g.money + buildingMeta[b.kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos) };
+  });
+  const upgradeAt = (pos: string) => setGame(g => {
+    const b = g.buildings[pos]; if (!b) return g;
+    const level = b.level || 1, cost = upgradeCost(b.kind, level);
+    if (g.money < cost) { setToast(`업그레이드 자금이 ₩${won(cost - g.money)} 부족합니다`); return g; }
+    setToast(`${buildingMeta[b.kind].name} Lv.${level + 1} · 생산 효율 +25%`);
+    return { ...g, money: g.money - cost, buildings: { ...g.buildings, [pos]: { ...b, level: level + 1 } } };
+  });
 
   const save = () => { localStorage.setItem("factory-flow-save", JSON.stringify({ ...game, items: [] })); setToast("게임을 저장했습니다"); };
   const claimContract = () => {
@@ -180,7 +214,7 @@ export default function FactoryGame() {
     <section className="workspace">
       <nav className="mobile-dock" aria-label="모바일 게임 메뉴">
         <button className={mobilePanel === "build" ? "active" : ""} onClick={() => setMobilePanel(p => p === "build" ? null : "build")}><span>▦</span>건설</button>
-        <button className={selected === "rotate" ? "active" : ""} onClick={() => { setSelected("rotate"); setMobilePanel(null); }}><span>↻</span>회전</button>
+        <button className={recipeOpen ? "active" : ""} onClick={() => { setRecipeOpen(true); setMobilePanel(null); }}><span>⌘</span>조합법</button>
         <button className={selected === "delete" ? "active danger" : ""} onClick={() => { setSelected("delete"); setMobilePanel(null); }}><span>⌫</span>철거</button>
         <button className={mobilePanel === "intel" ? "active" : ""} onClick={() => setMobilePanel(p => p === "intel" ? null : "intel")}><span>◫</span>현황</button>
       </nav>
@@ -200,7 +234,7 @@ export default function FactoryGame() {
       <section className="map-area">
         <div className="map-toolbar">
           <div className="sector"><span className="pulse" /> A-01 산업 지구 <small>안정</small></div>
-          <div className="hint">휠: 확대 · Alt/중클릭 드래그: 이동 · R: 회전</div>
+          <div className="price-ticker"><span>◆ 철광석 <b>₩{won(itemMeta.ironOre.price * market.ironOre)}</b></span><i>→ 용광로 →</i><span>▣ 철판 <b>₩{won(itemMeta.ironPlate.price * market.ironPlate)}</b></span><button onClick={() => setRecipeOpen(true)}>⌘ 조합법</button></div>
           <div className="zoom"><button onClick={() => setZoom(z => Math.max(.55, z - .1))}>−</button><b>{Math.round(zoom * 100)}%</b><button onClick={() => setZoom(z => Math.min(1.25, z + .1))}>＋</button></div>
         </div>
         <div className="map-viewport"
@@ -217,6 +251,26 @@ export default function FactoryGame() {
           </div>
           <div className="map-legend"><span><i className="legend-iron" /> 철광맥</span><span><i className="legend-tree" /> 산림</span><span><i className="legend-stone" /> 암석</span></div>
         </div>
+        <div className="production-strip"><small>현재 생산</small>{activeProduction.length ? activeProduction.map(v => <span key={v}>{v}</span>) : <em>생산 라인 대기 중</em>}<b>운송 중 {game.items.length}</b></div>
+        {inspectorPos && inspected && inspectedInfo && <section className="structure-inspector">
+          <button className="inspector-close" onClick={() => setInspectorPos(null)} aria-label="닫기">×</button>
+          <header><span className={`build-icon ${inspected.kind}`}>{buildingMeta[inspected.kind].icon}</span><div><small>선택한 구조물</small><h3>{buildingMeta[inspected.kind].name} <em>LV.{inspected.level || 1}</em></h3></div><i>{DIRS[inspected.dir].icon}</i></header>
+          <p>{inspectedInfo.note}</p>
+          <div className="process-flow"><span><small>입력</small><b>{inspectedInfo.input}</b></span><i>→</i><span><small>현재 생산</small><b>{inspectedInfo.output}</b></span></div>
+          <div className="inspector-progress"><span>작업 진행도</span><b>{Math.min(100, Math.round(inspected.progress / 3 * 100))}%</b><div><i style={{ width: `${Math.min(100, inspected.progress / 3 * 100)}%` }} /></div></div>
+          <div className="inspector-actions"><button onClick={() => upgradeAt(inspectorPos)}>⬆ 업그레이드 <small>₩{won(upgradeCost(inspected.kind, inspected.level || 1))}</small></button><button onClick={() => rotateAt(inspectorPos)}>↻ 회전</button><button className="delete" onClick={() => deleteAt(inspectorPos)}>⌫ 삭제</button></div>
+        </section>}
+        {recipeOpen && <><button className="recipe-backdrop" aria-label="조합법 닫기" onClick={() => setRecipeOpen(false)} /><section className="recipe-book">
+          <header><div><small>PRODUCTION CODEX</small><h2>빠른 조합법</h2></div><button onClick={() => setRecipeOpen(false)}>×</button></header>
+          <p>재료를 화살표 방향으로 연결하면 자동으로 다음 제품이 생산됩니다.</p>
+          <div className="recipe-list">
+            <article><span className="recipe-tier">기초 채굴</span><div><b>◆ 철광맥</b><i>→</i><b>⛏ 철광기</b><i>→</i><strong>◆ 철광석</strong></div><small>현재 판매가 ₩{won(itemMeta.ironOre.price * market.ironOre)} · 바로 판매하거나 철판으로 가공</small></article>
+            <article><span className="recipe-tier hot">가공 추천</span><div><b>◆ 철광석 1</b><i>→</i><b>♨ 용광로</b><i>→</i><strong>▣ 철판 1</strong></div><small>현재 판매가 ₩{won(itemMeta.ironPlate.price * market.ironPlate)} · 철광석보다 높은 부가가치</small></article>
+            <article><span className="recipe-tier premium">고급 조립</span><div><b>▣ 철판 2</b><i>→</i><b>⚙ 조립기</b><i>→</i><strong>✿ 기어 1</strong></div><small>현재 판매가 ₩{won(itemMeta.gear.price * market.gear)} · 가장 높은 수익의 기초 조립품</small></article>
+            <article><span className="recipe-tier wood">목재</span><div><b>♠ 산림</b><i>→</i><b>♠ 벌목기</b><i>→</i><strong>▰ 원목</strong></div><small>현재 판매가 ₩{won(itemMeta.wood.price * market.wood)} · 안정적인 보조 수익</small></article>
+          </div>
+          <footer>생산품 → 컨베이어 → 판매소 순서로 연결하면 시세에 맞춰 자동 판매됩니다.</footer>
+        </section></>}
         <div className="toast"><span>i</span>{toast}</div>
       </section>
 
@@ -235,7 +289,7 @@ export default function FactoryGame() {
     <footer className="bottom-bar">
       <div className="selection"><span className={`build-icon ${selected}`}>{selected === "delete" ? "⌫" : selected === "rotate" ? "↻" : buildingMeta[selected].icon}</span><div><small>선택된 도구</small><b>{selected === "delete" ? "철거 도구" : selected === "rotate" ? "설치물 회전" : buildingMeta[selected].name}</b></div><p>{selected === "delete" ? "설치된 건물을 클릭해 철거" : selected === "rotate" ? "설치된 건물을 누를 때마다 90° 회전" : buildingMeta[selected].desc}</p><kbd>{selected === "rotate" ? "탭" : DIRS[rotation].icon}</kbd></div>
       <div className="factory-feed"><small>현재 생산</small><div className="feed-items">{game.items.slice(0, 8).map(i => <span key={i.id} style={{ color: itemMeta[i.type].color }}>{itemMeta[i.type].icon}</span>)}{!game.items.length && <em>라인이 대기 중입니다</em>}</div></div>
-      <div className="game-controls"><span className="fps"><i /> 60 FPS</span><button className={paused ? "active" : ""} onClick={() => setPaused(p => !p)}>{paused ? "▶" : "Ⅱ"}</button>{[1,2,4].map(s => <button key={s} className={speed === s ? "active" : ""} onClick={() => { setSpeed(s); setPaused(false); }}>{s}×</button>)}</div>
+      <div className="game-controls"><span className="fps"><i /> 60 FPS</span><span className="normal-speed">1× 정상 속도</span><button className={paused ? "active" : ""} onClick={() => setPaused(p => !p)}>{paused ? "▶" : "Ⅱ"}</button></div>
     </footer>
     <div className="portrait-lock"><span>↻</span><b>기기를 가로로 돌려주세요</b><small>Foundry Flow는 가로 화면에 최적화되어 있습니다.</small></div>
   </main>;
