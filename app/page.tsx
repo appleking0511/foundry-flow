@@ -10,6 +10,7 @@ type MovingItem = { id: number; type: Item; x: number; y: number };
 type GameState = {
   money: number; research: number; cityXp: number; buildings: Record<string, Building>;
   items: MovingItem[]; sold: Record<string, number>; inventory: Record<string, number>;
+  sellerStatus: Record<string, { type: Item; lastPrice: number; count: number; revenue: number }>;
   lifetime: number; nextId: number; expanded: boolean; researchLevel: number;
 };
 
@@ -55,7 +56,13 @@ const productionMeta: Record<Kind, { input: string; output: string; note: string
   seller: { input: "모든 생산품", output: "자동 판매", note: "시장 시세에 맞춰 물품을 즉시 판매합니다." },
   lab: { input: "시간", output: "연구 포인트", note: "새 기술에 필요한 연구 포인트를 생산합니다." },
 };
-const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, lifetime: 0, nextId: 1, expanded: false, researchLevel: 1 };
+const recipeCatalog: { item: Item; building: string; ingredients: string; steps: string[]; requirement: string; tip: string }[] = [
+  { item: "ironOre", building: "철광기", ingredients: "철광맥 + 전기", steps: ["철광맥 위에 철광기 설치", "원목을 넣은 화력발전기 가동", "전선으로 철광기까지 연결", "출구에 컨베이어 연결"], requirement: "연구 Lv.1 · 전력 공급 필수", tip: "초반에는 바로 팔 수 있지만 철판으로 가공하면 더 비쌉니다." },
+  { item: "wood", building: "벌목기", ingredients: "산림", steps: ["나무 자원 위에 벌목기 설치", "출구 방향 선택", "컨베이어로 발전기·용광로·판매소에 공급"], requirement: "연구 Lv.1 · 전력 불필요", tip: "판매 수익뿐 아니라 발전과 제련에 쓰이는 핵심 연료입니다." },
+  { item: "ironPlate", building: "용광로", ingredients: "철광석 1 + 원목 화력", steps: ["철광석 라인을 용광로로 연결", "다른 라인에서 원목을 용광로에 투입", "용광로 출구에 컨베이어 연결", "철판을 조립기 또는 판매소로 운송"], requirement: "연구 Lv.1 · 원목 1개로 화력 4 충전", tip: "철광석보다 단가가 높고 기어 제작 재료로도 사용됩니다." },
+  { item: "gear", building: "조립기", ingredients: "철판 2", steps: ["연구소에서 연구 포인트 생산", "연구 Lv.2를 달성해 조립기 해금", "철판 라인을 조립기에 연결", "완성된 기어를 판매소로 운송"], requirement: "연구 Lv.2 · 철판 2개 필요", tip: "현재 기초 공장에서 만들 수 있는 가장 비싼 조립품입니다." },
+];
+const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, sellerStatus: {}, lifetime: 0, nextId: 1, expanded: false, researchLevel: 1 };
 const key = (x: number, y: number) => `${x},${y}`;
 const won = (n: number) => new Intl.NumberFormat("ko-KR").format(Math.floor(n));
 const upgradeCost = (kind: Kind, level: number) => Math.floor(Math.max(250, buildingMeta[kind].cost * (.55 + level * .2)));
@@ -93,6 +100,8 @@ export default function FactoryGame() {
   const [mobilePanel, setMobilePanel] = useState<"build" | "intel" | null>(null);
   const [inspectorPos, setInspectorPos] = useState<string | null>(null);
   const [recipeOpen, setRecipeOpen] = useState(false);
+  const [recipeQuery, setRecipeQuery] = useState("");
+  const [selectedRecipe, setSelectedRecipe] = useState<Item>("ironOre");
   const [loaded, setLoaded] = useState(false);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const down = useRef<{ x: number; y: number } | null>(null);
@@ -114,7 +123,7 @@ export default function FactoryGame() {
 
   const tick = useCallback(() => setGame(prev => {
     if (paused) return prev;
-    const g: GameState = { ...prev, buildings: { ...prev.buildings }, items: prev.items.map(i => ({ ...i })), sold: { ...prev.sold }, inventory: { ...prev.inventory }, lifetime: prev.lifetime + .5 };
+    const g: GameState = { ...prev, buildings: { ...prev.buildings }, items: prev.items.map(i => ({ ...i })), sold: { ...prev.sold }, inventory: { ...prev.inventory }, sellerStatus: { ...prev.sellerStatus }, lifetime: prev.lifetime + .5 };
     for (const [pos, b] of Object.entries(g.buildings)) if (b.kind === "powerPlant" && (g.inventory[`fuel:${pos}`] || 0) > 0) g.inventory[`fuel:${pos}`] = Math.max(0, g.inventory[`fuel:${pos}`] - .25);
     const powered = poweredNetwork(g.buildings, g.inventory);
     const occupied = new Map(g.items.map(i => [key(i.x, i.y), i]));
@@ -148,7 +157,10 @@ export default function FactoryGame() {
         g.inventory[`heat:${machinePos}`] = (g.inventory[`heat:${machinePos}`] || 0) + 4; toRemove.add(item.id); occupied.delete(machinePos); continue;
       }
       if (b.kind === "seller") {
-        const value = itemMeta[item.type].price * market[item.type]; earned += value; xp += Math.max(1, value / 25); g.sold[item.type] = (g.sold[item.type] || 0) + 1; toRemove.add(item.id); occupied.delete(key(item.x, item.y)); continue;
+        const value = itemMeta[item.type].price * market[item.type];
+        const previousSale = g.sellerStatus[machinePos];
+        g.sellerStatus[machinePos] = { type: item.type, lastPrice: value, count: (previousSale?.count || 0) + 1, revenue: (previousSale?.revenue || 0) + value };
+        earned += value; xp += Math.max(1, value / 25); g.sold[item.type] = (g.sold[item.type] || 0) + 1; toRemove.add(item.id); occupied.delete(machinePos); continue;
       }
       if (b.kind === "smelter" && item.type === "ironOre") {
         if ((g.inventory[`heat:${machinePos}`] || 0) < 1) continue;
@@ -185,7 +197,8 @@ export default function FactoryGame() {
       }
       if (selected === "delete") {
         if (!g.buildings[pos]) return g; setToast("건물을 철거하고 비용의 50%를 회수했습니다");
-        return { ...g, money: g.money + buildingMeta[g.buildings[pos].kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos) };
+        const sellerStatus = { ...g.sellerStatus }; delete sellerStatus[pos];
+        return { ...g, money: g.money + buildingMeta[g.buildings[pos].kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos), sellerStatus };
       }
       const meta = buildingMeta[selected];
       if (g.buildings[pos]) { setInspectorPos(pos); setToast("구조물 관리창을 열었습니다"); return g; }
@@ -208,6 +221,9 @@ export default function FactoryGame() {
   const itemAt = new Map(game.items.map(i => [key(i.x, i.y), i]));
   const inspected = inspectorPos ? game.buildings[inspectorPos] : undefined;
   const inspectedInfo = inspected ? productionMeta[inspected.kind] : undefined;
+  const inspectedSale = inspectorPos ? game.sellerStatus[inspectorPos] : undefined;
+  const visibleRecipes = recipeCatalog.filter(recipe => `${itemMeta[recipe.item].label} ${recipe.building} ${recipe.ingredients}`.toLowerCase().includes(recipeQuery.trim().toLowerCase()));
+  const recipeDetail = recipeCatalog.find(recipe => recipe.item === selectedRecipe) || visibleRecipes[0] || recipeCatalog[0];
   const activeProduction = Array.from(new Set(Object.values(game.buildings).map(b => productionMeta[b.kind].output).filter(v => !v.includes("운송") && !v.includes("보관") && !v.includes("판매"))));
   const livePower = poweredNetwork(game.buildings, game.inventory);
 
@@ -220,7 +236,8 @@ export default function FactoryGame() {
   const deleteAt = (pos: string) => setGame(g => {
     const b = g.buildings[pos]; if (!b) return g;
     setInspectorPos(null); setToast(`${buildingMeta[b.kind].name} 철거 · 비용 50% 회수`);
-    return { ...g, money: g.money + buildingMeta[b.kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos) };
+    const sellerStatus = { ...g.sellerStatus }; delete sellerStatus[pos];
+    return { ...g, money: g.money + buildingMeta[b.kind].cost * .5, buildings: Object.fromEntries(Object.entries(g.buildings).filter(([k]) => k !== pos)), items: g.items.filter(i => key(i.x, i.y) !== pos), sellerStatus };
   });
   const upgradeAt = (pos: string) => setGame(g => {
     const b = g.buildings[pos]; if (!b) return g;
@@ -303,6 +320,13 @@ export default function FactoryGame() {
           {inspected.kind === "drill" && <div className={`power-status ${livePower.has(inspectorPos) ? "on" : "off"}`}>⚡ {livePower.has(inspectorPos) ? "전력 공급 중 · 정상 채굴" : "전력 없음 · 발전기와 전선을 연결하세요"}</div>}
           {inspected.kind === "powerPlant" && <div className={`power-status ${(game.inventory[`fuel:${inspectorPos}`] || 0) > 0 ? "on" : "off"}`}>♠ 원목 연료 {Math.floor(game.inventory[`fuel:${inspectorPos}`] || 0)} · {(game.inventory[`fuel:${inspectorPos}`] || 0) > 0 ? "발전 중" : "컨베이어로 원목을 공급하세요"}</div>}
           {inspected.kind === "smelter" && <div className={`power-status ${(game.inventory[`heat:${inspectorPos}`] || 0) > 0 ? "heat" : "off"}`}>♨ 화력 {Math.floor(game.inventory[`heat:${inspectorPos}`] || 0)} · {(game.inventory[`heat:${inspectorPos}`] || 0) > 0 ? "제련 가능" : "컨베이어로 원목을 공급하세요"}</div>}
+          {inspected.kind === "seller" && <div className="seller-report">
+            <div className="seller-report-head"><span>자동 판매 현황</span><em className={inspectedSale ? "live" : "waiting"}>{inspectedSale ? "판매 중" : "대기 중"}</em></div>
+            {inspectedSale ? <>
+              <div className="seller-product"><span style={{ color: itemMeta[inspectedSale.type].color }}>{itemMeta[inspectedSale.type].icon}</span><div><small>최근 판매 품목</small><b>{itemMeta[inspectedSale.type].label}</b></div><strong>₩{won(inspectedSale.lastPrice)}<small>최근 1개 판매가</small></strong></div>
+              <div className="seller-stats"><span><small>현재 시장가</small><b>₩{won(itemMeta[inspectedSale.type].price * market[inspectedSale.type])}</b></span><span><small>누적 판매량</small><b>{won(inspectedSale.count)}개</b></span><span><small>누적 매출</small><b>₩{won(inspectedSale.revenue)}</b></span></div>
+            </> : <div className="seller-empty"><span>⇢</span><div><b>판매할 물품을 기다리는 중</b><small>컨베이어를 판매소에 연결하면 도착한 물품과 판매가가 여기에 표시됩니다.</small></div></div>}
+          </div>}
           <div className="process-flow"><span><small>입력</small><b>{inspectedInfo.input}</b></span><i>→</i><span><small>현재 생산</small><b>{inspectedInfo.output}</b></span></div>
           <div className="inspector-progress"><span>작업 진행도</span><b>{Math.min(100, Math.round(inspected.progress / 3 * 100))}%</b><div><i style={{ width: `${Math.min(100, inspected.progress / 3 * 100)}%` }} /></div></div>
           <div className="inspector-actions"><button disabled={noUpgrade.has(inspected.kind)} onClick={() => upgradeAt(inspectorPos)}>{noUpgrade.has(inspected.kind) ? "업그레이드 없음" : "⬆ 업그레이드"}<small>{noUpgrade.has(inspected.kind) ? "기본 성능 고정" : `₩${won(upgradeCost(inspected.kind, inspected.level || 1))}`}</small></button><button disabled={noDirection.has(inspected.kind)} onClick={() => rotateAt(inspectorPos)}>{noDirection.has(inspected.kind) ? "방향 없음" : "↻ 회전"}</button><button className="delete" onClick={() => deleteAt(inspectorPos)}>⌫ 삭제</button></div>
@@ -310,7 +334,26 @@ export default function FactoryGame() {
         {recipeOpen && <><button className="recipe-backdrop" aria-label="조합법 닫기" onClick={() => setRecipeOpen(false)} /><section className="recipe-book">
           <header><div><small>PRODUCTION CODEX</small><h2>빠른 조합법</h2></div><button onClick={() => setRecipeOpen(false)}>×</button></header>
           <p>재료를 화살표 방향으로 연결하면 자동으로 다음 제품이 생산됩니다.</p>
-          <div className="recipe-list">
+          <label className="recipe-search"><span>⌕</span><input value={recipeQuery} onChange={e => setRecipeQuery(e.target.value)} placeholder="아이템·재료·시설 검색" /><em>{visibleRecipes.length}개</em></label>
+          <div className="recipe-catalog">
+            <div className="recipe-table-wrap">
+              <table className="recipe-table">
+                <thead><tr><th>아이템</th><th>필요 시설</th><th>재료</th><th>현재 판매가</th></tr></thead>
+                <tbody>{visibleRecipes.map(recipe => <tr key={recipe.item} className={recipeDetail.item === recipe.item ? "selected" : ""} onClick={() => setSelectedRecipe(recipe.item)}>
+                  <td><span style={{ color: itemMeta[recipe.item].color }}>{itemMeta[recipe.item].icon}</span><b>{itemMeta[recipe.item].label}</b></td><td>{recipe.building}</td><td>{recipe.ingredients}</td><td>₩{won(itemMeta[recipe.item].price * market[recipe.item])}</td>
+                </tr>)}</tbody>
+              </table>
+              {!visibleRecipes.length && <div className="recipe-no-results"><b>검색 결과가 없습니다</b><small>철광석, 원목, 용광로처럼 다른 검색어를 입력해 보세요.</small></div>}
+            </div>
+            {visibleRecipes.length > 0 && <article className="recipe-detail">
+              <header><span style={{ color: itemMeta[recipeDetail.item].color }}>{itemMeta[recipeDetail.item].icon}</span><div><small>선택한 아이템</small><h3>{itemMeta[recipeDetail.item].label}</h3></div><strong>₩{won(itemMeta[recipeDetail.item].price * market[recipeDetail.item])}<small>현재 판매가</small></strong></header>
+              <div className="recipe-formula"><b>{recipeDetail.ingredients}</b><i>→</i><b>{recipeDetail.building}</b><i>→</i><strong>{itemMeta[recipeDetail.item].label}</strong></div>
+              <ol>{recipeDetail.steps.map((step, index) => <li key={step}><span>{index + 1}</span>{step}</li>)}</ol>
+              <div className="recipe-requirement"><span>해금·작동 조건</span><b>{recipeDetail.requirement}</b></div>
+              <p>{recipeDetail.tip}</p>
+            </article>}
+          </div>
+          <div className="recipe-list legacy-recipes">
             <article><span className="recipe-tier">기초 채굴</span><div><b>◆ 철광맥</b><i>→</i><b>⛏ 철광기</b><i>→</i><strong>◆ 철광석</strong></div><small>현재 판매가 ₩{won(itemMeta.ironOre.price * market.ironOre)} · 바로 판매하거나 철판으로 가공</small></article>
             <article><span className="recipe-tier hot">전력 공급</span><div><b>▰ 원목</b><i>→</i><b>⚡ 화력발전기</b><i>→</i><strong>⌁ 전선 → 철광기</strong></div><small>철광기는 발전 중인 발전기와 전선으로 연결되어야 작동</small></article>
             <article><span className="recipe-tier hot">가공 추천</span><div><b>◆ 철광석 1 + ▰ 원목</b><i>→</i><b>♨ 용광로</b><i>→</i><strong>▣ 철판 1</strong></div><small>원목 1개로 철판 4개 제련 · 현재 판매가 ₩{won(itemMeta.ironPlate.price * market.ironPlate)}</small></article>
