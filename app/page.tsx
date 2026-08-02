@@ -56,9 +56,11 @@ export default function FactoryGame() {
   const [market, setMarket] = useState<Record<Item, number>>(() => Object.fromEntries(Object.keys(itemMeta).map(k => [k, 1])) as Record<Item, number>);
   const [toast, setToast] = useState("철광기에 컨베이어를 연결해 생산을 시작하세요");
   const [tab, setTab] = useState<"status" | "market" | "contract">("status");
+  const [mobilePanel, setMobilePanel] = useState<"build" | "intel" | null>(null);
   const [loaded, setLoaded] = useState(false);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const down = useRef<{ x: number; y: number } | null>(null);
+  const wasDragging = useRef(false);
 
   useEffect(() => {
     try { const raw = localStorage.getItem("factory-flow-save"); if (raw) setGame({ ...initial, ...JSON.parse(raw), items: [] }); } catch {}
@@ -124,7 +126,7 @@ export default function FactoryGame() {
   useEffect(() => { const id = setInterval(tick, 500); return () => clearInterval(id); }, [tick]);
 
   const place = (x: number, y: number) => {
-    if (down.current && Math.hypot(down.current.x - x, down.current.y - y) > 4) return;
+    if (wasDragging.current) { wasDragging.current = false; return; }
     const pos = key(x, y);
     setGame(g => {
       if (selected === "delete") {
@@ -169,11 +171,18 @@ export default function FactoryGame() {
     </header>
 
     <section className="workspace">
-      <aside className="build-panel panel">
+      <nav className="mobile-dock" aria-label="모바일 게임 메뉴">
+        <button className={mobilePanel === "build" ? "active" : ""} onClick={() => setMobilePanel(p => p === "build" ? null : "build")}><span>▦</span>건설</button>
+        <button onClick={() => setRotation(r => (r + 1) % 4)}><span>↻</span>회전</button>
+        <button className={selected === "delete" ? "active danger" : ""} onClick={() => { setSelected("delete"); setMobilePanel(null); }}><span>⌫</span>철거</button>
+        <button className={mobilePanel === "intel" ? "active" : ""} onClick={() => setMobilePanel(p => p === "intel" ? null : "intel")}><span>◫</span>현황</button>
+      </nav>
+      {mobilePanel && <button className="mobile-backdrop" aria-label="패널 닫기" onClick={() => setMobilePanel(null)} />}
+      <aside className={`build-panel panel ${mobilePanel === "build" ? "mobile-open" : ""}`}>
         <div className="panel-title"><div><span>BUILD</span><h2>건설 메뉴</h2></div><kbd>R 회전</kbd></div>
         <div className="palette-scroll">
           {groups.map(group => <section key={group} className="build-group"><h3>{group}</h3><div className="build-grid">
-            {buildings.filter(b => b.group === group).map(b => <button key={b.kind} className={`build-card ${selected === b.kind ? "active" : ""}`} onClick={() => setSelected(b.kind)} title={b.desc}>
+            {buildings.filter(b => b.group === group).map(b => <button key={b.kind} className={`build-card ${selected === b.kind ? "active" : ""}`} onClick={() => { setSelected(b.kind); setMobilePanel(null); }} title={b.desc}>
               <span className={`build-icon ${b.kind}`}>{b.icon}</span><span><b>{b.name}</b><small>₩{won(b.cost)}</small></span>
             </button>)}
           </div></section>)}
@@ -189,8 +198,8 @@ export default function FactoryGame() {
         </div>
         <div className="map-viewport"
           onWheel={e => { e.preventDefault(); setZoom(z => Math.max(.55, Math.min(1.25, z + (e.deltaY < 0 ? .06 : -.06)))); }}
-          onPointerDown={e => { down.current = { x: e.clientX, y: e.clientY }; if (e.altKey || e.button === 1) { e.currentTarget.setPointerCapture(e.pointerId); drag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y }; } }}
-          onPointerMove={e => { if (drag.current) setPan({ x: drag.current.px + e.clientX - drag.current.x, y: drag.current.py + e.clientY - drag.current.y }); }}
+          onPointerDown={e => { down.current = { x: e.clientX, y: e.clientY }; wasDragging.current = false; if (e.pointerType === "touch" || e.altKey || e.button === 1) { e.currentTarget.setPointerCapture(e.pointerId); drag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y }; } }}
+          onPointerMove={e => { if (drag.current) { if (Math.hypot(e.clientX - drag.current.x, e.clientY - drag.current.y) > 6) wasDragging.current = true; setPan({ x: drag.current.px + e.clientX - drag.current.x, y: drag.current.py + e.clientY - drag.current.y }); } }}
           onPointerUp={() => { drag.current = null; down.current = null; }}>
           <div className="map-grid" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, gridTemplateColumns: `repeat(${W}, 64px)` }}>
             {Array.from({ length: W * H }, (_, i) => { const x = i % W, y = Math.floor(i / W), pos = key(x, y), res = resources[pos], b = game.buildings[pos], item = itemAt.get(pos); return <button key={pos} className={`tile ${res ? `res-${res}` : ""} ${b ? "occupied" : ""}`} onClick={() => place(x, y)} aria-label={`${x}, ${y} 타일`}>
@@ -204,7 +213,7 @@ export default function FactoryGame() {
         <div className="toast"><span>i</span>{toast}</div>
       </section>
 
-      <aside className="intel-panel panel">
+      <aside className={`intel-panel panel ${mobilePanel === "intel" ? "mobile-open" : ""}`}>
         <div className="tabs"><button className={tab === "status" ? "active" : ""} onClick={() => setTab("status")}>현황</button><button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>시장</button><button className={tab === "contract" ? "active" : ""} onClick={() => setTab("contract")}>계약 <i /></button></div>
         {tab === "status" && <div className="intel-scroll">
           <section className="efficiency-card"><div className="ring" style={{ "--value": `${efficiency * 3.6}deg` } as React.CSSProperties}><div><strong>{efficiency}%</strong><small>공장 효율</small></div></div><div className="eff-stats"><span><i className="orange" /> 병목 <b>{Math.max(0, 3 - Math.floor(contractNow / 8))}</b></span><span><i className="red" /> 멈춘 기계 <b>{Math.max(0, Object.values(game.buildings).filter(b => b.kind !== "conveyor" && b.progress > 5).length)}</b></span><span><i className="blue" /> 운송 중 <b>{game.items.length}</b></span></div></section>
@@ -221,5 +230,6 @@ export default function FactoryGame() {
       <div className="factory-feed"><small>현재 생산</small><div className="feed-items">{game.items.slice(0, 8).map(i => <span key={i.id} style={{ color: itemMeta[i.type].color }}>{itemMeta[i.type].icon}</span>)}{!game.items.length && <em>라인이 대기 중입니다</em>}</div></div>
       <div className="game-controls"><span className="fps"><i /> 60 FPS</span><button className={paused ? "active" : ""} onClick={() => setPaused(p => !p)}>{paused ? "▶" : "Ⅱ"}</button>{[1,2,4].map(s => <button key={s} className={speed === s ? "active" : ""} onClick={() => { setSpeed(s); setPaused(false); }}>{s}×</button>)}</div>
     </footer>
+    <div className="portrait-lock"><span>↻</span><b>기기를 가로로 돌려주세요</b><small>Foundry Flow는 가로 화면에 최적화되어 있습니다.</small></div>
   </main>;
 }
