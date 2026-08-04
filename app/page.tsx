@@ -8,13 +8,17 @@ type Item = "ironOre" | "wood" | "stone" | "coal" | "copperOre" | "copperWire" |
 type Building = { kind: Kind; dir: number; progress: number; level?: number; altDir?: number };
 type MovingItem = { id: number; type: Item; x: number; y: number };
 type CityProject = { name: string; icon: string; description: string; requirements: Partial<Record<Item, number>>; rewardMoney: number; rewardResearch: number; unlock: string };
+type DefenseKind = "wall" | "turret" | "missile";
+type DefenseBuilding = { kind: DefenseKind; hp: number };
+type Zombie = { id: number; x: number; y: number; hp: number; maxHp: number };
+type BattleState = { phase: "prepare" | "battle" | "won" | "lost"; zombies: Zombie[]; pending: number; coreHp: number; tick: number };
 type GameState = {
   money: number; research: number; cityXp: number; buildings: Record<string, Building>;
   items: MovingItem[]; sold: Record<string, number>; inventory: Record<string, number>;
   sellerStatus: Record<string, { type: Item; lastPrice: number; count: number; revenue: number }>;
   lifetime: number; nextId: number; expanded: boolean; researchLevel: number; landTier: number;
   cityProject: number; cityDeliveries: Record<string, number>; satisfaction: number;
-  securityStock: Record<string, number>; securityStage: number;
+  securityStock: Record<string, number>; securityStage: number; securityLayout: Record<string, DefenseBuilding>;
 };
 
 const MAP_MIN_X = -18, MAP_MAX_X = 36, MAP_MIN_Y = -12, MAP_MAX_Y = 23;
@@ -104,13 +108,19 @@ const cityProjects: CityProject[] = [
   { name: "스마트 에너지 지구", icon: "▯", description: "구리 전선과 배터리로 도시 전체의 지능형 전력망을 완성합니다.", requirements: { copperWire: 100, battery: 30, gear: 35 }, rewardMoney: 24000, rewardResearch: 120, unlock: "Lv.5 정밀 부품 산업 준비" },
 ];
 const securityStages = [
-  { name: "외곽 정찰대", threat: 18, steel: 12, parts: 4, reward: 1200, research: 8 },
-  { name: "폐허 도로 봉쇄", threat: 32, steel: 24, parts: 10, reward: 2600, research: 14 },
-  { name: "동부 관문 방어", threat: 48, steel: 42, parts: 20, reward: 4800, research: 22 },
-  { name: "야간 대규모 습격", threat: 68, steel: 70, parts: 36, reward: 8500, research: 35 },
-  { name: "도시 포위전", threat: 88, steel: 110, parts: 60, reward: 15000, research: 55 },
+  { name: "외곽 정찰대", threat: 18, zombies: 7, zombieHp: 12, reward: 1200, research: 8 },
+  { name: "폐허 도로 봉쇄", threat: 32, zombies: 11, zombieHp: 17, reward: 2600, research: 14 },
+  { name: "동부 관문 방어", threat: 48, zombies: 15, zombieHp: 23, reward: 4800, research: 22 },
+  { name: "야간 대규모 습격", threat: 68, zombies: 20, zombieHp: 31, reward: 8500, research: 35 },
+  { name: "도시 포위전", threat: 88, zombies: 26, zombieHp: 42, reward: 15000, research: 55 },
 ];
-const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, sellerStatus: {}, lifetime: 0, nextId: 1, expanded: false, researchLevel: 1, landTier: 1, cityProject: 0, cityDeliveries: {}, satisfaction: 70, securityStock: {}, securityStage: 0 };
+const defenseMeta: Record<DefenseKind, { name: string; icon: string; steel: number; parts: number; hp: number; range: number; damage: number; desc: string }> = {
+  wall: { name: "철제 울타리", icon: "▥", steel: 2, parts: 0, hp: 34, range: 0, damage: 0, desc: "좀비의 진격을 막아 시간을 벌어줍니다." },
+  turret: { name: "기관총 포탑", icon: "⌖", steel: 6, parts: 4, hp: 28, range: 3, damage: 5, desc: "사거리 3칸 안의 좀비를 빠르게 공격합니다." },
+  missile: { name: "미사일 포대", icon: "▲", steel: 10, parts: 8, hp: 24, range: 5, damage: 11, desc: "긴 사거리와 높은 피해로 강한 좀비를 공격합니다." },
+};
+const DEF_W = 14, DEF_H = 9, CORE_X = 7, CORE_Y = 4;
+const initial: GameState = { money: 4200, research: 0, cityXp: 0, buildings: {}, items: [], sold: {}, inventory: {}, sellerStatus: {}, lifetime: 0, nextId: 1, expanded: false, researchLevel: 1, landTier: 1, cityProject: 0, cityDeliveries: {}, satisfaction: 70, securityStock: {}, securityStage: 0, securityLayout: {} };
 const key = (x: number, y: number) => `${x},${y}`;
 const won = (n: number) => new Intl.NumberFormat("ko-KR").format(Math.floor(n));
 const researchCost = (level: number) => 80 + (level - 1) * 70;
@@ -158,6 +168,23 @@ function poweredNetwork(buildings: Record<string, Building>, inventory: Record<s
   return powered;
 }
 
+function nextDefenseStep(x: number, y: number, layout: Record<string, DefenseBuilding>) {
+  const target = key(CORE_X, CORE_Y), start = key(x, y), queue = [start], visited = new Set([start]), previous = new Map<string, string>();
+  while (queue.length) {
+    const pos = queue.shift()!; if (pos === target) break;
+    const [cx, cy] = pos.split(",").map(Number);
+    for (const d of DIRS) {
+      const nx = cx + d.x, ny = cy + d.y, np = key(nx, ny);
+      if (nx < 0 || nx >= DEF_W || ny < 0 || ny >= DEF_H || visited.has(np) || (layout[np] && np !== start)) continue;
+      visited.add(np); previous.set(np, pos); queue.push(np);
+    }
+  }
+  if (!visited.has(target)) return null;
+  let cursor = target;
+  while (previous.get(cursor) && previous.get(cursor) !== start) cursor = previous.get(cursor)!;
+  const [nx, ny] = cursor.split(",").map(Number); return { x: nx, y: ny };
+}
+
 export default function FactoryGame() {
   const [game, setGame] = useState<GameState>(initial);
   const [selected, setSelected] = useState<Kind | "delete" | "rotate">("conveyor");
@@ -173,6 +200,8 @@ export default function FactoryGame() {
   const [inspectorPos, setInspectorPos] = useState<string | null>(null);
   const [recipeOpen, setRecipeOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+  const [defenseSelected, setDefenseSelected] = useState<DefenseKind | "erase">("wall");
+  const [battle, setBattle] = useState<BattleState>({ phase: "prepare", zombies: [], pending: 0, coreHp: 100, tick: 0 });
   const [recipeQuery, setRecipeQuery] = useState("");
   const [selectedRecipe, setSelectedRecipe] = useState<Item>("ironOre");
   const [loaded, setLoaded] = useState(false);
@@ -191,9 +220,10 @@ export default function FactoryGame() {
   const bgmStep = useRef(0);
   const incomeEvents = useRef<{ at: number; value: number }[]>([]);
   const gameRef = useRef<GameState>(initial);
+  const battleRewardedStage = useRef<number | null>(null);
 
   useEffect(() => {
-    try { const raw = localStorage.getItem("factory-flow-save"); if (raw) { const parsed = JSON.parse(raw); setGame({ ...initial, ...parsed, landTier: Math.max(1, Number(parsed.landTier ?? (parsed.expanded ? 2 : 1))), cityDeliveries: { ...(parsed.cityDeliveries || {}) }, securityStock: { ...(parsed.securityStock || {}) }, sellerStatus: { ...(parsed.sellerStatus || {}) }, inventory: { ...(parsed.inventory || {}) }, items: [] }); } } catch {}
+    try { const raw = localStorage.getItem("factory-flow-save"); if (raw) { const parsed = JSON.parse(raw); setGame({ ...initial, ...parsed, landTier: Math.max(1, Number(parsed.landTier ?? (parsed.expanded ? 2 : 1))), cityDeliveries: { ...(parsed.cityDeliveries || {}) }, securityStock: { ...(parsed.securityStock || {}) }, securityLayout: { ...(parsed.securityLayout || {}) }, sellerStatus: { ...(parsed.sellerStatus || {}) }, inventory: { ...(parsed.inventory || {}) }, items: [] }); } } catch {}
     setLoaded(true);
   }, []);
   useEffect(() => { gameRef.current = game; }, [game]);
@@ -431,12 +461,10 @@ export default function FactoryGame() {
   const cityProjectComplete = !!currentCityProject && cityRequirementEntries.every(([type, amount]) => (game.cityDeliveries?.[type] || 0) >= amount);
   const cityProjectProgress = currentCityProject ? cityRequirementEntries.reduce((sum, [type, amount]) => sum + Math.min(1, (game.cityDeliveries?.[type] || 0) / amount), 0) / Math.max(1, cityRequirementEntries.length) * 100 : 100;
   const citySaleBonus = Math.max(0, (game.satisfaction ?? 70) - 60) / 2;
-  const securityScore = Math.min(100, (game.securityStock?.fenceSteel || 0) * .6 + (game.securityStock?.defenseParts || 0) * 1.4);
+  const securityScore = Math.min(100, Object.values(game.securityLayout || {}).reduce((sum, building) => sum + building.hp, 0) / 3);
   const currentSecurityStage = securityStages[game.securityStage || 0];
   const zombieThreat = currentSecurityStage?.threat || 0;
-  const securityStageReady = !!currentSecurityStage
-    && (game.securityStock?.fenceSteel || 0) >= currentSecurityStage.steel
-    && (game.securityStock?.defenseParts || 0) >= currentSecurityStage.parts;
+  const securityStageReady = !!currentSecurityStage && Object.values(game.securityLayout || {}).some(building => building.kind === "turret" || building.kind === "missile");
 
   const rotateAt = (pos: string) => setGame(g => {
     const b = g.buildings[pos]; if (!b) return g;
@@ -496,26 +524,77 @@ export default function FactoryGame() {
     setGame(g => ({ ...g, money: g.money + 3500, research: g.research + 20, sold: { ...g.sold, ironPlate: (g.sold.ironPlate || 0) - 20 } })); setToast("계약 완료! ₩3,500 + 연구 20 획득");
   };
 
-  const completeSecurityStage = () => setGame(g => {
-    const stageIndex = g.securityStage || 0;
-    const stage = securityStages[stageIndex];
-    if (!stage) { setToast("모든 도시 안보 스테이지를 클리어했습니다!"); return g; }
-    const steel = g.securityStock?.fenceSteel || 0;
-    const parts = g.securityStock?.defenseParts || 0;
-    if (steel < stage.steel || parts < stage.parts) {
-      setToast(`방어 물자가 부족합니다 · 철판 ${stage.steel} / 기어 ${stage.parts}`);
-      return g;
-    }
-    playSfx("upgrade");
-    setToast(`STAGE ${stageIndex + 1} 클리어 · ₩${stage.reward.toLocaleString()} + ${stage.research} RP`);
-    return {
-      ...g,
-      money: g.money + stage.reward,
-      research: g.research + stage.research,
-      securityStage: stageIndex + 1,
-      securityStock: { ...g.securityStock, fenceSteel: steel - stage.steel, defenseParts: parts - stage.parts }
-    };
-  });
+  const placeDefense = (x: number, y: number) => {
+    if (battle.phase === "battle") { setToast("전투 중에는 방어시설을 변경할 수 없습니다"); return; }
+    if (x === CORE_X && y === CORE_Y) { setToast("도시 핵심 시설이 있는 타일입니다"); return; }
+    const pos = key(x, y);
+    setGame(g => {
+      const layout = { ...(g.securityLayout || {}) }, existing = layout[pos];
+      if (defenseSelected === "erase") {
+        if (!existing) return g;
+        const meta = defenseMeta[existing.kind]; delete layout[pos]; playSfx("delete");
+        setToast(`${meta.name} 철거 · 자재 일부 회수`);
+        return { ...g, securityLayout: layout, securityStock: { ...g.securityStock, fenceSteel: (g.securityStock.fenceSteel || 0) + Math.floor(meta.steel / 2), defenseParts: (g.securityStock.defenseParts || 0) + Math.floor(meta.parts / 2) } };
+      }
+      if (existing) { setToast("이미 방어시설이 설치된 타일입니다"); return g; }
+      const meta = defenseMeta[defenseSelected];
+      if ((g.securityStock.fenceSteel || 0) < meta.steel || (g.securityStock.defenseParts || 0) < meta.parts) { setToast(`${meta.name} 설치 물자가 부족합니다`); return g; }
+      layout[pos] = { kind: defenseSelected, hp: meta.hp }; playSfx("install"); setToast(`${meta.name} 설치 완료`);
+      return { ...g, securityLayout: layout, securityStock: { ...g.securityStock, fenceSteel: (g.securityStock.fenceSteel || 0) - meta.steel, defenseParts: (g.securityStock.defenseParts || 0) - meta.parts } };
+    });
+  };
+
+  const startDefenseBattle = () => {
+    if (!currentSecurityStage) { setToast("모든 도시 안보 스테이지를 클리어했습니다!"); return; }
+    if (!securityStageReady) { setToast("기관총 포탑 또는 미사일 포대를 먼저 설치하세요"); return; }
+    battleRewardedStage.current = null; playSfx("upgrade"); setToast(`STAGE ${(game.securityStage || 0) + 1} 방어 작전 시작`);
+    setBattle({ phase: "battle", zombies: [], pending: currentSecurityStage.zombies, coreHp: 100, tick: 0 });
+  };
+
+  useEffect(() => {
+    if (battle.phase !== "battle") return;
+    const id = setInterval(() => setBattle(previous => {
+      if (previous.phase !== "battle") return previous;
+      const stageIndex = gameRef.current.securityStage || 0, stage = securityStages[stageIndex];
+      if (!stage) return { ...previous, phase: "won" };
+      let pending = previous.pending, coreHp = previous.coreHp, zombies = previous.zombies.map(zombie => ({ ...zombie }));
+      const layout = Object.fromEntries(Object.entries(gameRef.current.securityLayout || {}).map(([pos, building]) => [pos, { ...building }])) as Record<string, DefenseBuilding>;
+      const spawns = [{ x: 0, y: 1 }, { x: DEF_W - 1, y: 7 }, { x: 0, y: 7 }, { x: DEF_W - 1, y: 1 }, { x: 7, y: 0 }, { x: 7, y: DEF_H - 1 }];
+      if (pending > 0) {
+        const spawn = spawns[(stage.zombies - pending) % spawns.length];
+        zombies.push({ id: Date.now() + pending, x: spawn.x, y: spawn.y, hp: stage.zombieHp, maxHp: stage.zombieHp }); pending -= 1;
+      }
+      for (const [pos, defense] of Object.entries(layout)) {
+        const meta = defenseMeta[defense.kind]; if (!meta.damage) continue;
+        const [tx, ty] = pos.split(",").map(Number);
+        const target = zombies.filter(zombie => zombie.hp > 0 && Math.abs(zombie.x - tx) + Math.abs(zombie.y - ty) <= meta.range).sort((a, b) => (Math.abs(a.x - CORE_X) + Math.abs(a.y - CORE_Y)) - (Math.abs(b.x - CORE_X) + Math.abs(b.y - CORE_Y)))[0];
+        if (target) target.hp -= meta.damage;
+      }
+      zombies = zombies.filter(zombie => zombie.hp > 0);
+      for (const zombie of zombies) {
+        if (Math.abs(zombie.x - CORE_X) + Math.abs(zombie.y - CORE_Y) <= 1) { coreHp -= 5 + stageIndex * 2; continue; }
+        const step = nextDefenseStep(zombie.x, zombie.y, layout);
+        if (step) { zombie.x = step.x; zombie.y = step.y; continue; }
+        const adjacent = DIRS.map(direction => key(zombie.x + direction.x, zombie.y + direction.y)).find(pos => layout[pos]);
+        if (adjacent) { layout[adjacent].hp -= 7 + stageIndex * 2; if (layout[adjacent].hp <= 0) delete layout[adjacent]; }
+        else {
+          const dx = Math.sign(CORE_X - zombie.x), dy = Math.sign(CORE_Y - zombie.y), nx = zombie.x + (Math.abs(CORE_X - zombie.x) >= Math.abs(CORE_Y - zombie.y) ? dx : 0), ny = zombie.y + (Math.abs(CORE_X - zombie.x) < Math.abs(CORE_Y - zombie.y) ? dy : 0), np = key(nx, ny);
+          if (layout[np]) { layout[np].hp -= 7 + stageIndex * 2; if (layout[np].hp <= 0) delete layout[np]; } else { zombie.x = nx; zombie.y = ny; }
+        }
+      }
+      setGame(g => ({ ...g, securityLayout: layout }));
+      if (coreHp <= 0) { setToast("도시 핵심 시설이 파괴되었습니다 · 방어선을 재정비하세요"); return { phase: "lost", zombies, pending, coreHp: 0, tick: previous.tick + 1 }; }
+      if (pending === 0 && zombies.length === 0) {
+        if (battleRewardedStage.current !== stageIndex) {
+          battleRewardedStage.current = stageIndex; playSfx("upgrade"); setToast(`STAGE ${stageIndex + 1} 클리어 · ₩${stage.reward.toLocaleString()} + ${stage.research} RP`);
+          setGame(g => ({ ...g, money: g.money + stage.reward, research: g.research + stage.research, securityStage: stageIndex + 1 }));
+        }
+        return { phase: "won", zombies: [], pending: 0, coreHp, tick: previous.tick + 1 };
+      }
+      return { phase: "battle", zombies, pending, coreHp, tick: previous.tick + 1 };
+    }), 650);
+    return () => clearInterval(id);
+  }, [battle.phase, playSfx]);
 
   return <main className="game-shell">
     {!started && <section className={`boot-screen ${bootReady ? "ready" : "loading"}`} onClick={startGame} aria-label={bootReady ? "게임 시작" : "게임 로딩 중"}>
@@ -676,31 +755,40 @@ export default function FactoryGame() {
       </aside>
     </section>
 
-    {securityOpen && <section className="security-screen">
-      <header><div><small>NATIONAL DEFENSE CONTROL</small><h2>도시 안보 지휘소</h2></div><button onClick={() => setSecurityOpen(false)}>× 닫기</button></header>
-      <div className="security-layout">
-        <section className="security-city">
-          <div className="security-sky"><span>위협 단계 <b>{zombieThreat >= 70 ? "심각" : zombieThreat >= 45 ? "경계" : "주의"}</b></span></div>
-          <div className="city-silhouette"><i /><i /><i /><i /><i /><i /></div>
-          <div className="defense-wall" style={{ opacity: .35 + securityScore / 155 }}><span>철제 방어선</span></div>
-          <div className="zombie-line">{Array.from({ length: 8 }, (_, index) => <i key={index}>♟</i>)}</div>
-          <div className="city-condition"><span>도시 방어력 <b>{Math.round(securityScore)}%</b></span><div><i style={{ width: `${securityScore}%` }} /></div></div>
-        </section>
-        <aside className="security-console">
-          <section><small>현재 좀비 위협</small><strong>{zombieThreat}%</strong><div className="threat-track"><i style={{ width: `${zombieThreat}%` }} /></div></section>
-          {currentSecurityStage ? <section className="security-stage-card">
-            <header><div><small>CURRENT MISSION</small><h3>STAGE {(game.securityStage || 0) + 1} · {currentSecurityStage.name}</h3></div><em>{securityStageReady ? "출격 가능" : "보급 필요"}</em></header>
-            <div className="stage-requirements">
-              <span className={(game.securityStock?.fenceSteel || 0) >= currentSecurityStage.steel ? "ready" : ""}><i>▰</i><p>철제 방어 자재<small>{Math.floor(game.securityStock?.fenceSteel || 0)} / {currentSecurityStage.steel}</small></p></span>
-              <span className={(game.securityStock?.defenseParts || 0) >= currentSecurityStage.parts ? "ready" : ""}><i>⚙</i><p>기계 방어 부품<small>{Math.floor(game.securityStock?.defenseParts || 0)} / {currentSecurityStage.parts}</small></p></span>
-            </div>
-            <div className="stage-reward"><small>클리어 보상</small><b>₩{currentSecurityStage.reward.toLocaleString()} · {currentSecurityStage.research} RP</b></div>
-            <button disabled={!securityStageReady} onClick={completeSecurityStage}>{securityStageReady ? "방어 작전 시작" : "물자를 더 보급하세요"}</button>
-          </section> : <section className="security-complete"><span>★</span><h3>도시 안보 작전 완료</h3><p>현재 공개된 모든 좀비 스테이지를 클리어했습니다.</p></section>}
-          <div className="security-stage-roadmap">{securityStages.map((stage, index) => <span key={stage.name} className={index < (game.securityStage || 0) ? "cleared" : index === (game.securityStage || 0) ? "active" : ""}><b>{index < (game.securityStage || 0) ? "✓" : index + 1}</b><small>{stage.name}</small></span>)}</div>
-          <h3>안보 보급 현황</h3>
-          <div className="security-supplies"><span><i>▣</i><p><b>철제 방어 자재</b><small>철판을 안보 보급소로 운송</small></p><strong>{Math.floor(game.securityStock?.fenceSteel || 0)}</strong></span><span><i>✿</i><p><b>기계 방어 부품</b><small>기어를 안보 보급소로 운송</small></p><strong>{Math.floor(game.securityStock?.defenseParts || 0)}</strong></span><span className="locked"><i>⌁</i><p><b>총기·미사일</b><small>향후 무기 산업 업데이트에서 해금</small></p><strong>잠김</strong></span></div>
-          <div className="security-note"><b>방어 준비 단계</b><p>현재는 철판과 기어를 비축해 도시 방어 기반을 강화할 수 있습니다. 이후 총·미사일·철제 울타리 생산라인과 실제 좀비 웨이브 전투가 이 화면에 연결됩니다.</p></div>
+    {securityOpen && <section className="security-screen defense-screen">
+      <header><div><small>APPLEKING CITY DEFENSE</small><h2>도시 안보 작전 지도</h2></div><span className={`battle-phase ${battle.phase}`}>{battle.phase === "prepare" ? "배치 단계" : battle.phase === "battle" ? "좀비 침입 중" : battle.phase === "won" ? "작전 성공" : "방어 실패"}</span><button onClick={() => setSecurityOpen(false)}>× 공장으로</button></header>
+      <div className="defense-layout">
+        <aside className="defense-build-menu">
+          <div className="defense-stock"><span><small>철제 자재</small><b>▣ {Math.floor(game.securityStock?.fenceSteel || 0)}</b></span><span><small>기계 부품</small><b>✿ {Math.floor(game.securityStock?.defenseParts || 0)}</b></span></div>
+          <h3>방어시설 건설</h3>
+          {(Object.keys(defenseMeta) as DefenseKind[]).map(kind => { const meta = defenseMeta[kind], locked = kind === "missile" && (game.securityStage || 0) < 2; return <button key={kind} disabled={battle.phase === "battle" || locked} className={defenseSelected === kind ? "active" : ""} onClick={() => setDefenseSelected(kind)}><span>{meta.icon}</span><div><b>{meta.name}</b><small>{meta.desc}</small><em>▣ {meta.steel}{meta.parts ? ` · ✿ ${meta.parts}` : ""}</em></div>{locked && <i>STAGE 3 해금</i>}</button>})}
+          <button className={`defense-erase ${defenseSelected === "erase" ? "active" : ""}`} disabled={battle.phase === "battle"} onClick={() => setDefenseSelected("erase")}><span>⌫</span><div><b>시설 철거</b><small>선택한 시설을 철거하고 자재 50% 회수</small></div></button>
+          <div className="defense-help"><b>배치 방법</b><p>시설을 선택한 뒤 전장 타일을 누르세요. 전투 시작 전에는 자유롭게 재배치할 수 있습니다.</p></div>
+        </aside>
+
+        <main className="defense-battlefield-wrap">
+          <div className="battlefield-top"><span>도시 핵심 내구도 <b>{Math.max(0, battle.coreHp)}%</b></span><div><i style={{ width: `${Math.max(0, battle.coreHp)}%` }} /></div><em>적 {battle.zombies.length + battle.pending}</em></div>
+          <div className={`defense-grid ${battle.phase}`} style={{ gridTemplateColumns: `repeat(${DEF_W},1fr)` }}>
+            {Array.from({ length: DEF_W * DEF_H }, (_, index) => { const x = index % DEF_W, y = Math.floor(index / DEF_W), pos = key(x, y), defense = game.securityLayout?.[pos], meta = defense ? defenseMeta[defense.kind] : null, zombiesHere = battle.zombies.filter(zombie => zombie.x === x && zombie.y === y); return <button key={pos} onClick={() => placeDefense(x, y)} disabled={battle.phase === "battle"} className={`${x === CORE_X && y === CORE_Y ? "core" : ""} ${defense ? `has-defense ${defense.kind}` : ""} ${zombiesHere.length ? "under-attack" : ""}`}>
+              {x === CORE_X && y === CORE_Y && <span className="city-core">▦<small>CITY</small></span>}
+              {defense && meta && <span className="defense-unit">{meta.icon}<small>{meta.name}</small><i style={{ width: `${Math.max(0, defense.hp / meta.hp * 100)}%` }} /></span>}
+              {zombiesHere.map((zombie, zombieIndex) => <span key={zombie.id} className="battle-zombie" style={{ transform: `translate(${zombieIndex * 4}px,${zombieIndex * -3}px)` }}>♟<i style={{ width: `${Math.max(0, zombie.hp / zombie.maxHp * 100)}%` }} /></span>)}
+            </button>})}
+          </div>
+          <div className="battlefield-legend"><span><i className="spawn-dot" /> 좀비 출현 지점: 전장 외곽</span><span>울타리로 길을 만들고 포탑의 사거리를 겹치세요</span></div>
+        </main>
+
+        <aside className="defense-mission">
+          {currentSecurityStage ? <><div className="mission-threat"><small>CURRENT STAGE</small><strong>{(game.securityStage || 0) + 1}</strong><span><b>{currentSecurityStage.name}</b><em>위협도 {zombieThreat}%</em></span></div>
+            <div className="mission-info"><span><small>좀비 규모</small><b>{currentSecurityStage.zombies}마리</b></span><span><small>개체 내구도</small><b>{currentSecurityStage.zombieHp}</b></span><span><small>방어력</small><b>{Math.round(securityScore)}%</b></span></div>
+            <div className="mission-reward"><small>클리어 보상</small><b>₩{won(currentSecurityStage.reward)}</b><em>+{currentSecurityStage.research} RP</em></div>
+            {battle.phase === "prepare" && <button className="battle-start" disabled={!securityStageReady} onClick={startDefenseBattle}>{securityStageReady ? "좀비 웨이브 시작" : "공격 시설을 설치하세요"}</button>}
+            {battle.phase === "battle" && <button className="battle-start fighting" disabled>방어 작전 진행 중 · {battle.zombies.length + battle.pending}</button>}
+            {battle.phase === "lost" && <button className="battle-start retry" onClick={() => setBattle({ phase: "prepare", zombies: [], pending: 0, coreHp: 100, tick: 0 })}>방어선 재정비</button>}
+            {battle.phase === "won" && <button className="battle-start victory" onClick={() => setBattle({ phase: "prepare", zombies: [], pending: 0, coreHp: 100, tick: 0 })}>다음 스테이지 준비</button>}
+          </> : <div className="security-complete"><span>★</span><h3>모든 작전 완료</h3><p>현재 공개된 좀비 스테이지를 모두 방어했습니다.</p></div>}
+          <div className="defense-roadmap">{securityStages.map((stage, index) => <span key={stage.name} className={index < (game.securityStage || 0) ? "cleared" : index === (game.securityStage || 0) ? "active" : ""}><b>{index < (game.securityStage || 0) ? "✓" : index + 1}</b><small>{stage.name}</small></span>)}</div>
+          <div className="defense-tips"><b>작전 정보</b><p>좀비는 도시 핵심부로 가장 가까운 길을 찾습니다. 길이 완전히 막히면 앞의 울타리나 포탑을 파괴합니다.</p><p>기관총은 빠른 연사, 미사일은 긴 사거리와 높은 피해가 강점입니다.</p></div>
         </aside>
       </div>
     </section>}
