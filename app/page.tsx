@@ -9,9 +9,10 @@ type Building = { kind: Kind; dir: number; progress: number; level?: number; alt
 type MovingItem = { id: number; type: Item; x: number; y: number };
 type CityProject = { name: string; icon: string; description: string; requirements: Partial<Record<Item, number>>; rewardMoney: number; rewardResearch: number; unlock: string };
 type DefenseKind = "wall" | "turret" | "missile";
+type ZombieKind = "normal" | "runner" | "tank" | "spitter";
 type DefenseBuilding = { kind: DefenseKind; hp: number };
-type Zombie = { id: number; x: number; y: number; hp: number; maxHp: number };
-type BattleState = { phase: "prepare" | "battle" | "won" | "lost"; zombies: Zombie[]; pending: number; coreHp: number; tick: number };
+type Zombie = { id: number; kind: ZombieKind; x: number; y: number; hp: number; maxHp: number };
+type BattleState = { phase: "prepare" | "battle" | "won" | "lost"; stage: number; zombies: Zombie[]; pending: number; coreHp: number; tick: number };
 type GameState = {
   money: number; research: number; cityXp: number; buildings: Record<string, Building>;
   items: MovingItem[]; sold: Record<string, number>; inventory: Record<string, number>;
@@ -108,12 +109,25 @@ const cityProjects: CityProject[] = [
   { name: "스마트 에너지 지구", icon: "▯", description: "구리 전선과 배터리로 도시 전체의 지능형 전력망을 완성합니다.", requirements: { copperWire: 100, battery: 30, gear: 35 }, rewardMoney: 24000, rewardResearch: 120, unlock: "Lv.5 정밀 부품 산업 준비" },
 ];
 const securityStages = [
-  { name: "외곽 정찰대", threat: 18, zombies: 7, zombieHp: 12, reward: 1200, research: 8 },
-  { name: "폐허 도로 봉쇄", threat: 32, zombies: 11, zombieHp: 17, reward: 2600, research: 14 },
-  { name: "동부 관문 방어", threat: 48, zombies: 15, zombieHp: 23, reward: 4800, research: 22 },
-  { name: "야간 대규모 습격", threat: 68, zombies: 20, zombieHp: 31, reward: 8500, research: 35 },
-  { name: "도시 포위전", threat: 88, zombies: 26, zombieHp: 42, reward: 15000, research: 55 },
-];
+  { name: "외곽 정찰", threat: 12, composition: { normal: 8, runner: 0, tank: 0, spitter: 0 }, reward: 1000, research: 6 },
+  { name: "고속도로 습격", threat: 20, composition: { normal: 10, runner: 2, tank: 0, spitter: 0 }, reward: 1600, research: 9 },
+  { name: "질주자 출현", threat: 29, composition: { normal: 12, runner: 5, tank: 0, spitter: 0 }, reward: 2400, research: 13 },
+  { name: "철갑 좀비", threat: 39, composition: { normal: 14, runner: 3, tank: 3, spitter: 0 }, reward: 3500, research: 18 },
+  { name: "공단 야간전", threat: 49, composition: { normal: 16, runner: 7, tank: 2, spitter: 0 }, reward: 5000, research: 24 },
+  { name: "산성 감염체", threat: 59, composition: { normal: 18, runner: 5, tank: 4, spitter: 3 }, reward: 6800, research: 31 },
+  { name: "동부 관문전", threat: 68, composition: { normal: 21, runner: 10, tank: 4, spitter: 2 }, reward: 9000, research: 39 },
+  { name: "중장갑 군단", threat: 78, composition: { normal: 24, runner: 8, tank: 7, spitter: 4 }, reward: 12000, research: 48 },
+  { name: "도시 포위망", threat: 89, composition: { normal: 27, runner: 13, tank: 8, spitter: 5 }, reward: 16000, research: 60 },
+  { name: "감염 군주", threat: 100, composition: { normal: 32, runner: 16, tank: 10, spitter: 8 }, reward: 24000, research: 80 },
+] as const;
+const zombieMeta: Record<ZombieKind, { name: string; icon: string; hp: number; damage: number; desc: string }> = {
+  normal: { name: "일반 좀비", icon: "♟", hp: 12, damage: 6, desc: "표준 속도와 공격력" },
+  runner: { name: "질주 좀비", icon: "♞", hp: 9, damage: 5, desc: "한 번에 두 칸 이동" },
+  tank: { name: "중장갑 좀비", icon: "♜", hp: 38, damage: 13, desc: "높은 체력과 시설 파괴력" },
+  spitter: { name: "산성 좀비", icon: "♝", hp: 18, damage: 8, desc: "도시를 원거리 공격" },
+};
+const stageZombieCount = (stage: typeof securityStages[number]) => Object.values(stage.composition).reduce((sum, count) => sum + count, 0);
+const factoryImages: Partial<Record<Kind, string>> = { drill: "/assets/factory/iron-drill.webp", conveyor: "/assets/factory/conveyor.webp", powerPlant: "/assets/factory/power-plant.webp", lab: "/assets/factory/research-lab.webp" };
 const defenseMeta: Record<DefenseKind, { name: string; icon: string; steel: number; parts: number; hp: number; range: number; damage: number; desc: string }> = {
   wall: { name: "철제 울타리", icon: "▥", steel: 2, parts: 0, hp: 34, range: 0, damage: 0, desc: "좀비의 진격을 막아 시간을 벌어줍니다." },
   turret: { name: "기관총 포탑", icon: "⌖", steel: 6, parts: 4, hp: 28, range: 3, damage: 5, desc: "사거리 3칸 안의 좀비를 빠르게 공격합니다." },
@@ -200,8 +214,10 @@ export default function FactoryGame() {
   const [inspectorPos, setInspectorPos] = useState<string | null>(null);
   const [recipeOpen, setRecipeOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+  const [stagePickerOpen, setStagePickerOpen] = useState(false);
+  const [selectedSecurityStage, setSelectedSecurityStage] = useState(0);
   const [defenseSelected, setDefenseSelected] = useState<DefenseKind | "erase">("wall");
-  const [battle, setBattle] = useState<BattleState>({ phase: "prepare", zombies: [], pending: 0, coreHp: 100, tick: 0 });
+  const [battle, setBattle] = useState<BattleState>({ phase: "prepare", stage: 0, zombies: [], pending: 0, coreHp: 100, tick: 0 });
   const [recipeQuery, setRecipeQuery] = useState("");
   const [selectedRecipe, setSelectedRecipe] = useState<Item>("ironOre");
   const [loaded, setLoaded] = useState(false);
@@ -462,7 +478,7 @@ export default function FactoryGame() {
   const cityProjectProgress = currentCityProject ? cityRequirementEntries.reduce((sum, [type, amount]) => sum + Math.min(1, (game.cityDeliveries?.[type] || 0) / amount), 0) / Math.max(1, cityRequirementEntries.length) * 100 : 100;
   const citySaleBonus = Math.max(0, (game.satisfaction ?? 70) - 60) / 2;
   const securityScore = Math.min(100, Object.values(game.securityLayout || {}).reduce((sum, building) => sum + building.hp, 0) / 3);
-  const currentSecurityStage = securityStages[game.securityStage || 0];
+  const currentSecurityStage = securityStages[selectedSecurityStage];
   const zombieThreat = currentSecurityStage?.threat || 0;
   const securityStageReady = !!currentSecurityStage && Object.values(game.securityLayout || {}).some(building => building.kind === "turret" || building.kind === "missile");
 
@@ -545,24 +561,25 @@ export default function FactoryGame() {
   };
 
   const startDefenseBattle = () => {
-    if (!currentSecurityStage) { setToast("모든 도시 안보 스테이지를 클리어했습니다!"); return; }
+    if (selectedSecurityStage > (game.securityStage || 0)) { setToast("이전 스테이지를 먼저 클리어하세요"); return; }
     if (!securityStageReady) { setToast("기관총 포탑 또는 미사일 포대를 먼저 설치하세요"); return; }
-    battleRewardedStage.current = null; playSfx("upgrade"); setToast(`STAGE ${(game.securityStage || 0) + 1} 방어 작전 시작`);
-    setBattle({ phase: "battle", zombies: [], pending: currentSecurityStage.zombies, coreHp: 100, tick: 0 });
+    battleRewardedStage.current = null; playSfx("upgrade"); setToast(`STAGE ${selectedSecurityStage + 1} 방어 작전 시작`);
+    setBattle({ phase: "battle", stage: selectedSecurityStage, zombies: [], pending: stageZombieCount(currentSecurityStage), coreHp: 100, tick: 0 });
   };
 
   useEffect(() => {
     if (battle.phase !== "battle") return;
     const id = setInterval(() => setBattle(previous => {
       if (previous.phase !== "battle") return previous;
-      const stageIndex = gameRef.current.securityStage || 0, stage = securityStages[stageIndex];
+      const stageIndex = previous.stage, stage = securityStages[stageIndex];
       if (!stage) return { ...previous, phase: "won" };
       let pending = previous.pending, coreHp = previous.coreHp, zombies = previous.zombies.map(zombie => ({ ...zombie }));
       const layout = Object.fromEntries(Object.entries(gameRef.current.securityLayout || {}).map(([pos, building]) => [pos, { ...building }])) as Record<string, DefenseBuilding>;
       const spawns = [{ x: 0, y: 1 }, { x: DEF_W - 1, y: 7 }, { x: 0, y: 7 }, { x: DEF_W - 1, y: 1 }, { x: 7, y: 0 }, { x: 7, y: DEF_H - 1 }];
       if (pending > 0) {
-        const spawn = spawns[(stage.zombies - pending) % spawns.length];
-        zombies.push({ id: Date.now() + pending, x: spawn.x, y: spawn.y, hp: stage.zombieHp, maxHp: stage.zombieHp }); pending -= 1;
+        const zombieQueue = (Object.entries(stage.composition) as [ZombieKind, number][]).flatMap(([kind, count]) => Array.from({ length: count }, () => kind));
+        const spawnIndex = zombieQueue.length - pending, kind = zombieQueue[spawnIndex], spawn = spawns[spawnIndex % spawns.length], maxHp = Math.round(zombieMeta[kind].hp * (1 + stageIndex * .11));
+        zombies.push({ id: Date.now() + pending, kind, x: spawn.x, y: spawn.y, hp: maxHp, maxHp }); pending -= 1;
       }
       for (const [pos, defense] of Object.entries(layout)) {
         const meta = defenseMeta[defense.kind]; if (!meta.damage) continue;
@@ -572,26 +589,31 @@ export default function FactoryGame() {
       }
       zombies = zombies.filter(zombie => zombie.hp > 0);
       for (const zombie of zombies) {
-        if (Math.abs(zombie.x - CORE_X) + Math.abs(zombie.y - CORE_Y) <= 1) { coreHp -= 5 + stageIndex * 2; continue; }
-        const step = nextDefenseStep(zombie.x, zombie.y, layout);
-        if (step) { zombie.x = step.x; zombie.y = step.y; continue; }
-        const adjacent = DIRS.map(direction => key(zombie.x + direction.x, zombie.y + direction.y)).find(pos => layout[pos]);
-        if (adjacent) { layout[adjacent].hp -= 7 + stageIndex * 2; if (layout[adjacent].hp <= 0) delete layout[adjacent]; }
-        else {
+        const moves = zombie.kind === "runner" ? 2 : 1;
+        for (let move = 0; move < moves; move += 1) {
+          const distance = Math.abs(zombie.x - CORE_X) + Math.abs(zombie.y - CORE_Y), attack = zombieMeta[zombie.kind].damage + Math.floor(stageIndex / 3);
+          if (zombie.kind === "spitter" && distance <= 3) { coreHp -= attack; break; }
+          if (distance <= 1) { coreHp -= attack; break; }
+          const step = nextDefenseStep(zombie.x, zombie.y, layout);
+          if (step) { zombie.x = step.x; zombie.y = step.y; continue; }
+          const adjacent = DIRS.map(direction => key(zombie.x + direction.x, zombie.y + direction.y)).find(pos => layout[pos]);
+          if (adjacent) { layout[adjacent].hp -= attack; if (layout[adjacent].hp <= 0) delete layout[adjacent]; break; }
           const dx = Math.sign(CORE_X - zombie.x), dy = Math.sign(CORE_Y - zombie.y), nx = zombie.x + (Math.abs(CORE_X - zombie.x) >= Math.abs(CORE_Y - zombie.y) ? dx : 0), ny = zombie.y + (Math.abs(CORE_X - zombie.x) < Math.abs(CORE_Y - zombie.y) ? dy : 0), np = key(nx, ny);
-          if (layout[np]) { layout[np].hp -= 7 + stageIndex * 2; if (layout[np].hp <= 0) delete layout[np]; } else { zombie.x = nx; zombie.y = ny; }
+          if (layout[np]) { layout[np].hp -= attack; if (layout[np].hp <= 0) delete layout[np]; break; } else { zombie.x = nx; zombie.y = ny; }
         }
       }
       setGame(g => ({ ...g, securityLayout: layout }));
-      if (coreHp <= 0) { setToast("도시 핵심 시설이 파괴되었습니다 · 방어선을 재정비하세요"); return { phase: "lost", zombies, pending, coreHp: 0, tick: previous.tick + 1 }; }
+      if (coreHp <= 0) { setToast("도시 핵심 시설이 파괴되었습니다 · 방어선을 재정비하세요"); return { phase: "lost", stage: stageIndex, zombies, pending, coreHp: 0, tick: previous.tick + 1 }; }
       if (pending === 0 && zombies.length === 0) {
         if (battleRewardedStage.current !== stageIndex) {
-          battleRewardedStage.current = stageIndex; playSfx("upgrade"); setToast(`STAGE ${stageIndex + 1} 클리어 · ₩${stage.reward.toLocaleString()} + ${stage.research} RP`);
-          setGame(g => ({ ...g, money: g.money + stage.reward, research: g.research + stage.research, securityStage: stageIndex + 1 }));
+          battleRewardedStage.current = stageIndex; playSfx("upgrade");
+          const firstClear = gameRef.current.securityStage === stageIndex;
+          setToast(firstClear ? `STAGE ${stageIndex + 1} 클리어 · ₩${stage.reward.toLocaleString()} + ${stage.research} RP` : `STAGE ${stageIndex + 1} 재도전 클리어`);
+          if (firstClear) { setGame(g => ({ ...g, money: g.money + stage.reward, research: g.research + stage.research, securityStage: Math.min(10, stageIndex + 1) })); setSelectedSecurityStage(Math.min(9, stageIndex + 1)); }
         }
-        return { phase: "won", zombies: [], pending: 0, coreHp, tick: previous.tick + 1 };
+        return { phase: "won", stage: stageIndex, zombies: [], pending: 0, coreHp, tick: previous.tick + 1 };
       }
-      return { phase: "battle", zombies, pending, coreHp, tick: previous.tick + 1 };
+      return { phase: "battle", stage: stageIndex, zombies, pending, coreHp, tick: previous.tick + 1 };
     }), 650);
     return () => clearInterval(id);
   }, [battle.phase, playSfx]);
@@ -629,7 +651,7 @@ export default function FactoryGame() {
         <div className="palette-scroll">
           {groups.map(group => <section key={group} className="build-group"><h3>{group}</h3><div className="build-grid">
             {buildings.filter(b => b.group === group).map(b => { const required = unlockLevel[b.kind] || 1, locked = game.researchLevel < required; return <button key={b.kind} disabled={locked} className={`build-card ${selected === b.kind ? "active" : ""} ${locked ? "locked" : ""}`} onClick={() => { setSelected(b.kind); setMobilePanel(null); }} title={locked ? `연구 Lv.${required} 필요` : b.desc}>
-              <span className={`build-icon ${b.kind}`}>{b.icon}</span><span className="build-copy"><b>{b.name}<em>₩{won(b.cost)}</em></b><small>{b.desc}</small></span>
+              <span className={`build-icon ${b.kind}`}>{factoryImages[b.kind] ? <img src={factoryImages[b.kind]} alt={b.name} /> : b.icon}</span><span className="build-copy"><b>{b.name}<em>₩{won(b.cost)}</em></b><small>{b.desc}</small></span>
               {locked && <i className="unlock-badge">연구 Lv.{required}</i>}
             </button>})}
           </div></section>)}
@@ -652,9 +674,9 @@ export default function FactoryGame() {
           onPointerCancel={e => { touchPointers.current.delete(e.pointerId); pinch.current = null; drag.current = null; }}>
           <div className="map-grid" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, gridTemplateColumns: `repeat(${W}, 64px)` }}>
             {Array.from({ length: W * H }, (_, i) => { const x = MAP_MIN_X + (i % W), y = MAP_MIN_Y + Math.floor(i / W), pos = key(x, y), res = resources[pos], b = game.buildings[pos], item = itemAt.get(pos), landLocked = !isLandUnlocked(x, y, game.landTier || 1), edgeMarker = landLocked && ((x === activeLandBounds.minX - 1 || x === activeLandBounds.maxX + 1) && y === Math.floor((activeLandBounds.minY + activeLandBounds.maxY) / 2) || (y === activeLandBounds.minY - 1 || y === activeLandBounds.maxY + 1) && x === Math.floor((activeLandBounds.minX + activeLandBounds.maxX) / 2)); return <button key={pos} className={`tile ${!landLocked && res ? `res-${res}` : ""} ${b ? "occupied" : ""} ${landLocked ? "land-locked" : ""}`} onClick={() => place(x, y)} aria-label={`${x}, ${y} 타일`}>
-              {res && !b && !landLocked && <div className="resource-node"><span>{resourceMeta[res].icon}</span><small>{resourceMeta[res].label}</small></div>}
+              {res && !b && !landLocked && <div className={`resource-node ${res}`}>{res === "iron" ? <img src="/assets/factory/iron-node.webp" alt="철광맥" /> : <span>{resourceMeta[res].icon}</span>}<small>{resourceMeta[res].label}</small></div>}
               {edgeMarker && <div className="land-fog"><b>구역 잠김</b><small>다음 부지는 상하좌우 동시 확장</small></div>}
-              {b && <div className={`placed ${b.kind} ${["drill", "copperDrill", "wireMill", "batteryPlant"].includes(b.kind) && livePower.has(pos) ? "powered" : ""}`}><span className="machine-icon">{buildingMeta[b.kind].icon}</span>{!noDirection.has(b.kind) && <i className={`dir d${b.dir}`}>{DIRS[b.dir].icon}</i>}{b.kind === "splitter" && <i className={`dir alt d${b.altDir ?? ((b.dir + 1) % 4)}`}>{DIRS[b.altDir ?? ((b.dir + 1) % 4)].icon}</i>}{b.kind !== "conveyor" && <small>{buildingMeta[b.kind].name}</small>}<em style={{ width: `${Math.min(100, b.progress / 3 * 100)}%` }} /></div>}
+              {b && <div className={`placed ${b.kind} ${["drill", "copperDrill", "wireMill", "batteryPlant"].includes(b.kind) && livePower.has(pos) ? "powered" : ""}`}><span className="machine-icon">{factoryImages[b.kind] ? <img src={factoryImages[b.kind]} alt={buildingMeta[b.kind].name} /> : buildingMeta[b.kind].icon}</span>{!noDirection.has(b.kind) && <i className={`dir d${b.dir}`}>{DIRS[b.dir].icon}</i>}{b.kind === "splitter" && <i className={`dir alt d${b.altDir ?? ((b.dir + 1) % 4)}`}>{DIRS[b.altDir ?? ((b.dir + 1) % 4)].icon}</i>}{b.kind !== "conveyor" && <small>{buildingMeta[b.kind].name}</small>}<em style={{ width: `${Math.min(100, b.progress / 3 * 100)}%` }} /></div>}
               {item && <span className="moving-item" style={{ background: itemMeta[item.type].color }} title={itemMeta[item.type].label}>{itemMeta[item.type].icon}</span>}
             </button>; })}
           </div>
@@ -663,7 +685,7 @@ export default function FactoryGame() {
         <div className="production-strip"><small>현재 생산</small>{activeProduction.length ? activeProduction.map(v => <span key={v}>{v}</span>) : <em>생산 라인 대기 중</em>}<b>운송 중 {game.items.length}</b></div>
         {inspectorPos && inspected && inspectedInfo && <section className="structure-inspector">
           <button className="inspector-close" onClick={() => setInspectorPos(null)} aria-label="닫기">×</button>
-          <header><span className={`build-icon ${inspected.kind}`}>{buildingMeta[inspected.kind].icon}</span><div><small>선택한 구조물</small><h3>{buildingMeta[inspected.kind].name} {!noUpgrade.has(inspected.kind) && <em>LV.{inspected.level || 1}</em>}</h3></div>{!noDirection.has(inspected.kind) && <i>{DIRS[inspected.dir].icon}</i>}</header>
+          <header><span className={`build-icon ${inspected.kind}`}>{factoryImages[inspected.kind] ? <img src={factoryImages[inspected.kind]} alt={buildingMeta[inspected.kind].name} /> : buildingMeta[inspected.kind].icon}</span><div><small>선택한 구조물</small><h3>{buildingMeta[inspected.kind].name} {!noUpgrade.has(inspected.kind) && <em>LV.{inspected.level || 1}</em>}</h3></div>{!noDirection.has(inspected.kind) && <i>{DIRS[inspected.dir].icon}</i>}</header>
           <p>{inspectedInfo.note}</p>
           {["powerPlant", "advancedPowerPlant", "smelter"].includes(inspected.kind) && <div className={`oxygen-status ${liveOxygen.has(inspectorPos) ? "on" : "off"}`}>O₂ {liveOxygen.has(inspectorPos) ? "산소 공급 정상 · 연소 가능" : "산소 부족 · 산소 공급기와 배관을 연결하세요"}</div>}
           {["oxygenGenerator", "oxygenPipe"].includes(inspected.kind) && <div className="oxygen-status on">O₂ {inspected.kind === "oxygenGenerator" ? "산소 생산 중" : liveOxygen.has(inspectorPos) ? "산소 전달 중" : "산소 공급기와 연결하세요"}</div>}
@@ -675,7 +697,7 @@ export default function FactoryGame() {
           {inspected.kind === "batteryPlant" && <div className={`power-status ${livePower.has(inspectorPos) ? "on" : "off"}`}>⚡ {livePower.has(inspectorPos) ? `전선 ${Math.floor(game.inventory[`batteryWire:${inspectorPos}`] || 0)} · 철판 ${Math.floor(game.inventory[`batteryPlate:${inspectorPos}`] || 0)}` : "전력 없음 · 발전기와 전선을 연결하세요"}</div>}
           {inspected.kind === "splitter" && <div className="splitter-ports"><span><small>출구 A</small><b>{DIRS[inspected.dir].icon}</b><button onClick={() => rotateSplitterPort(inspectorPos, "a")}>방향 변경</button></span><span><small>출구 B</small><b>{DIRS[inspected.altDir ?? ((inspected.dir + 1) % 4)].icon}</b><button onClick={() => rotateSplitterPort(inspectorPos, "b")}>방향 변경</button></span></div>}
           {inspected.kind === "cityDepot" && <div className="city-depot-status"><span>도시 만족도 <b>{Math.round(game.satisfaction ?? 70)}%</b></span><strong>{currentCityProject ? `${currentCityProject.icon} ${currentCityProject.name} 납품 중` : "✓ 공개 프로젝트 완료"}</strong><button onClick={() => { setTab("city"); setMobilePanel("intel"); setInspectorPos(null); }}>도시 목표 보기</button></div>}
-          {inspected.kind === "securityDepot" && <div className="security-depot-status"><span>철제 방어 자재 <b>{Math.floor(game.securityStock?.fenceSteel || 0)}</b></span><span>기계 방어 부품 <b>{Math.floor(game.securityStock?.defenseParts || 0)}</b></span><button onClick={() => { setSecurityOpen(true); setInspectorPos(null); }}>도시 안보 열기</button></div>}
+          {inspected.kind === "securityDepot" && <div className="security-depot-status"><span>철제 방어 자재 <b>{Math.floor(game.securityStock?.fenceSteel || 0)}</b></span><span>기계 방어 부품 <b>{Math.floor(game.securityStock?.defenseParts || 0)}</b></span><button onClick={() => { setSelectedSecurityStage(Math.min(game.securityStage || 0, 9)); setSecurityOpen(true); setInspectorPos(null); }}>도시 안보 열기</button></div>}
           {inspected.kind === "seller" && <div className="seller-report">
             <div className="seller-report-head"><span>자동 판매 현황</span><em className={inspectedSale ? "live" : "waiting"}>{inspectedSale ? "판매 중" : "대기 중"}</em></div>
             {inspectedSale ? <>
@@ -730,7 +752,7 @@ export default function FactoryGame() {
       </section>
 
       <aside className={`intel-panel panel ${mobilePanel === "intel" ? "mobile-open" : ""}`}>
-        <div className="tabs"><button className={tab === "status" ? "active" : ""} onClick={() => setTab("status")}>현황</button><button className={tab === "city" ? "active" : ""} onClick={() => setTab("city")}>도시 <i /></button><button onClick={() => setSecurityOpen(true)}>안보</button><button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>시장</button><button className={tab === "contract" ? "active" : ""} onClick={() => setTab("contract")}>계약</button></div>
+        <div className="tabs"><button className={tab === "status" ? "active" : ""} onClick={() => setTab("status")}>현황</button><button className={tab === "city" ? "active" : ""} onClick={() => setTab("city")}>도시 <i /></button><button onClick={() => { setSelectedSecurityStage(Math.min(game.securityStage || 0, 9)); setSecurityOpen(true); }}>안보</button><button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>시장</button><button className={tab === "contract" ? "active" : ""} onClick={() => setTab("contract")}>계약</button></div>
         <div className="income-live"><span><i />실시간 수익<small>최근 5초 평균</small></span><strong>₩{won(incomePerSecond)}<small>/초</small></strong></div>
         {tab === "status" && <div className="intel-scroll">
           <section className="efficiency-card"><div className="ring" style={{ "--value": `${efficiency * 3.6}deg` } as React.CSSProperties}><div><strong>{efficiency}%</strong><small>공장 효율</small></div></div><div className="eff-stats"><span><i className="orange" /> 병목 <b>{Math.max(0, 3 - Math.floor(contractNow / 8))}</b></span><span><i className="red" /> 멈춘 기계 <b>{Math.max(0, Object.values(game.buildings).filter(b => b.kind !== "conveyor" && b.progress > 5).length)}</b></span><span><i className="blue" /> 운송 중 <b>{game.items.length}</b></span></div></section>
@@ -760,10 +782,10 @@ export default function FactoryGame() {
       <div className="defense-layout">
         <aside className="defense-build-menu">
           <div className="defense-stock"><span><small>철제 자재</small><b>▣ {Math.floor(game.securityStock?.fenceSteel || 0)}</b></span><span><small>기계 부품</small><b>✿ {Math.floor(game.securityStock?.defenseParts || 0)}</b></span></div>
-          <h3>방어시설 건설</h3>
+          <h3>방어 장비 배치</h3>
           {(Object.keys(defenseMeta) as DefenseKind[]).map(kind => { const meta = defenseMeta[kind], locked = kind === "missile" && (game.securityStage || 0) < 2; return <button key={kind} disabled={battle.phase === "battle" || locked} className={defenseSelected === kind ? "active" : ""} onClick={() => setDefenseSelected(kind)}><span>{meta.icon}</span><div><b>{meta.name}</b><small>{meta.desc}</small><em>▣ {meta.steel}{meta.parts ? ` · ✿ ${meta.parts}` : ""}</em></div>{locked && <i>STAGE 3 해금</i>}</button>})}
           <button className={`defense-erase ${defenseSelected === "erase" ? "active" : ""}`} disabled={battle.phase === "battle"} onClick={() => setDefenseSelected("erase")}><span>⌫</span><div><b>시설 철거</b><small>선택한 시설을 철거하고 자재 50% 회수</small></div></button>
-          <div className="defense-help"><b>배치 방법</b><p>시설을 선택한 뒤 전장 타일을 누르세요. 전투 시작 전에는 자유롭게 재배치할 수 있습니다.</p></div>
+          <div className="defense-help"><b>무기 생산 시스템 예정</b><p>현재는 보급 자재로 현장 조립합니다. 이후 울타리·기관총·미사일을 공장 조합법으로 생산해 안보 보급소로 보내는 방식으로 전환됩니다.</p></div>
         </aside>
 
         <main className="defense-battlefield-wrap">
@@ -772,29 +794,32 @@ export default function FactoryGame() {
             {Array.from({ length: DEF_W * DEF_H }, (_, index) => { const x = index % DEF_W, y = Math.floor(index / DEF_W), pos = key(x, y), defense = game.securityLayout?.[pos], meta = defense ? defenseMeta[defense.kind] : null, zombiesHere = battle.zombies.filter(zombie => zombie.x === x && zombie.y === y); return <button key={pos} onClick={() => placeDefense(x, y)} disabled={battle.phase === "battle"} className={`${x === CORE_X && y === CORE_Y ? "core" : ""} ${defense ? `has-defense ${defense.kind}` : ""} ${zombiesHere.length ? "under-attack" : ""}`}>
               {x === CORE_X && y === CORE_Y && <span className="city-core">▦<small>CITY</small></span>}
               {defense && meta && <span className="defense-unit">{meta.icon}<small>{meta.name}</small><i style={{ width: `${Math.max(0, defense.hp / meta.hp * 100)}%` }} /></span>}
-              {zombiesHere.map((zombie, zombieIndex) => <span key={zombie.id} className="battle-zombie" style={{ transform: `translate(${zombieIndex * 4}px,${zombieIndex * -3}px)` }}>♟<i style={{ width: `${Math.max(0, zombie.hp / zombie.maxHp * 100)}%` }} /></span>)}
+              {zombiesHere.map((zombie, zombieIndex) => <span key={zombie.id} title={zombieMeta[zombie.kind].name} className={`battle-zombie ${zombie.kind}`} style={{ transform: `translate(${zombieIndex * 4}px,${zombieIndex * -3}px)` }}>{zombieMeta[zombie.kind].icon}<i style={{ width: `${Math.max(0, zombie.hp / zombie.maxHp * 100)}%` }} /></span>)}
             </button>})}
           </div>
           <div className="battlefield-legend"><span><i className="spawn-dot" /> 좀비 출현 지점: 전장 외곽</span><span>울타리로 길을 만들고 포탑의 사거리를 겹치세요</span></div>
         </main>
 
         <aside className="defense-mission">
-          {currentSecurityStage ? <><div className="mission-threat"><small>CURRENT STAGE</small><strong>{(game.securityStage || 0) + 1}</strong><span><b>{currentSecurityStage.name}</b><em>위협도 {zombieThreat}%</em></span></div>
-            <div className="mission-info"><span><small>좀비 규모</small><b>{currentSecurityStage.zombies}마리</b></span><span><small>개체 내구도</small><b>{currentSecurityStage.zombieHp}</b></span><span><small>방어력</small><b>{Math.round(securityScore)}%</b></span></div>
+          <button className="stage-select-button" disabled={battle.phase === "battle"} onClick={() => setStagePickerOpen(true)}>☰ 스테이지 선택 <b>1–10</b></button>
+          {currentSecurityStage ? <><div className="mission-threat"><small>SELECTED STAGE</small><strong>{selectedSecurityStage + 1}</strong><span><b>{currentSecurityStage.name}</b><em>위협도 {zombieThreat}%</em></span></div>
+            <div className="mission-info"><span><small>좀비 규모</small><b>{stageZombieCount(currentSecurityStage)}마리</b></span><span><small>특수 개체</small><b>{currentSecurityStage.composition.runner + currentSecurityStage.composition.tank + currentSecurityStage.composition.spitter}</b></span><span><small>방어력</small><b>{Math.round(securityScore)}%</b></span></div>
+            <div className="zombie-composition">{(Object.entries(currentSecurityStage.composition) as [ZombieKind, number][]).filter(([, count]) => count > 0).map(([kind, count]) => <span key={kind} className={kind}><i>{zombieMeta[kind].icon}</i><b>{zombieMeta[kind].name}</b><em>×{count}</em></span>)}</div>
             <div className="mission-reward"><small>클리어 보상</small><b>₩{won(currentSecurityStage.reward)}</b><em>+{currentSecurityStage.research} RP</em></div>
             {battle.phase === "prepare" && <button className="battle-start" disabled={!securityStageReady} onClick={startDefenseBattle}>{securityStageReady ? "좀비 웨이브 시작" : "공격 시설을 설치하세요"}</button>}
             {battle.phase === "battle" && <button className="battle-start fighting" disabled>방어 작전 진행 중 · {battle.zombies.length + battle.pending}</button>}
-            {battle.phase === "lost" && <button className="battle-start retry" onClick={() => setBattle({ phase: "prepare", zombies: [], pending: 0, coreHp: 100, tick: 0 })}>방어선 재정비</button>}
-            {battle.phase === "won" && <button className="battle-start victory" onClick={() => setBattle({ phase: "prepare", zombies: [], pending: 0, coreHp: 100, tick: 0 })}>다음 스테이지 준비</button>}
-          </> : <div className="security-complete"><span>★</span><h3>모든 작전 완료</h3><p>현재 공개된 좀비 스테이지를 모두 방어했습니다.</p></div>}
-          <div className="defense-roadmap">{securityStages.map((stage, index) => <span key={stage.name} className={index < (game.securityStage || 0) ? "cleared" : index === (game.securityStage || 0) ? "active" : ""}><b>{index < (game.securityStage || 0) ? "✓" : index + 1}</b><small>{stage.name}</small></span>)}</div>
+            {battle.phase === "lost" && <button className="battle-start retry" onClick={() => setBattle({ phase: "prepare", stage: selectedSecurityStage, zombies: [], pending: 0, coreHp: 100, tick: 0 })}>방어선 재정비</button>}
+            {battle.phase === "won" && <button className="battle-start victory" onClick={() => setBattle({ phase: "prepare", stage: selectedSecurityStage, zombies: [], pending: 0, coreHp: 100, tick: 0 })}>다음 스테이지 준비</button>}
+          </> : null}
+          <div className="defense-roadmap">{securityStages.map((stage, index) => <span key={stage.name} className={index < (game.securityStage || 0) ? "cleared" : index === selectedSecurityStage ? "active" : index > (game.securityStage || 0) ? "locked" : ""}><b>{index < (game.securityStage || 0) ? "✓" : index + 1}</b><small>{stage.name}</small></span>)}</div>
           <div className="defense-tips"><b>작전 정보</b><p>좀비는 도시 핵심부로 가장 가까운 길을 찾습니다. 길이 완전히 막히면 앞의 울타리나 포탑을 파괴합니다.</p><p>기관총은 빠른 연사, 미사일은 긴 사거리와 높은 피해가 강점입니다.</p></div>
         </aside>
       </div>
+      {stagePickerOpen && <div className="stage-picker-backdrop" onClick={() => setStagePickerOpen(false)}><section className="stage-picker" onClick={event => event.stopPropagation()}><header><div><small>CITY DEFENSE CAMPAIGN</small><h3>안보 스테이지 선택</h3></div><button onClick={() => setStagePickerOpen(false)}>×</button></header><p>스테이지는 순서대로 해금됩니다. 클리어한 작전은 언제든 다시 도전할 수 있습니다.</p><div className="stage-grid">{securityStages.map((stage, index) => { const locked = index > (game.securityStage || 0), total = stageZombieCount(stage), special = stage.composition.runner + stage.composition.tank + stage.composition.spitter; return <button key={stage.name} disabled={locked} className={`${index < (game.securityStage || 0) ? "cleared" : ""} ${index === selectedSecurityStage ? "selected" : ""}`} onClick={() => { setSelectedSecurityStage(index); setBattle({ phase: "prepare", stage: index, zombies: [], pending: 0, coreHp: 100, tick: 0 }); setStagePickerOpen(false); }}><em>{locked ? "LOCKED" : index < (game.securityStage || 0) ? "CLEARED" : "CURRENT"}</em><strong>{index + 1}</strong><div><b>{stage.name}</b><small>좀비 {total} · 특수 {special}</small><span>위협도 {stage.threat}%</span></div></button>})}</div></section></div>}
     </section>}
 
     <footer className="bottom-bar">
-      <div className="selection"><span className={`build-icon ${selected}`}>{selected === "delete" ? "⌫" : selected === "rotate" ? "↻" : buildingMeta[selected].icon}</span><div><small>선택된 도구</small><b>{selected === "delete" ? "철거 도구" : selected === "rotate" ? "설치물 회전" : buildingMeta[selected].name}</b></div><p>{selected === "delete" ? "설치된 건물을 클릭해 철거" : selected === "rotate" ? "설치된 건물을 누를 때마다 90° 회전" : buildingMeta[selected].desc}</p><kbd>{selected === "rotate" ? "탭" : DIRS[rotation].icon}</kbd></div>
+      <div className="selection"><span className={`build-icon ${selected}`}>{selected === "delete" ? "⌫" : selected === "rotate" ? "↻" : factoryImages[selected] ? <img src={factoryImages[selected]} alt={buildingMeta[selected].name} /> : buildingMeta[selected].icon}</span><div><small>선택된 도구</small><b>{selected === "delete" ? "철거 도구" : selected === "rotate" ? "설치물 회전" : buildingMeta[selected].name}</b></div><p>{selected === "delete" ? "설치된 건물을 클릭해 철거" : selected === "rotate" ? "설치된 건물을 누를 때마다 90° 회전" : buildingMeta[selected].desc}</p><kbd>{selected === "rotate" ? "탭" : DIRS[rotation].icon}</kbd></div>
       <div className="factory-feed"><small>현재 생산</small><div className="feed-items">{game.items.slice(0, 8).map(i => <span key={i.id} style={{ color: itemMeta[i.type].color }}>{itemMeta[i.type].icon}</span>)}{!game.items.length && <em>라인이 대기 중입니다</em>}</div></div>
       <div className="game-controls"><span className="fps"><i /> 60 FPS</span><span className="normal-speed">1× 정상 속도</span><button className={paused ? "active" : ""} onClick={() => setPaused(p => !p)}>{paused ? "▶" : "Ⅱ"}</button></div>
     </footer>
